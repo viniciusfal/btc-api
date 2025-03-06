@@ -134,7 +134,12 @@ func main() {
 		c.File(excelPath)
 	})
 
-	router.Run(":3333")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3333" // Porta padrão local
+	}
+	router.Run(":" + port)
+
 }
 
 func ProcessXML(filePath string) (string, error) {
