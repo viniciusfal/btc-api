@@ -277,46 +277,69 @@ func ProcessXML(filePath string) (string, error) {
 	row := 2
 
 	for _, data := range groupedData {
-		pagantesRestantes := data.Pagantes
+		// Criar uma cópia dos dados originais para não modificar o original
+		originalData := *data
+
+		pagantesRestantes := originalData.Pagantes
+		idosoRestante := originalData.Idoso
+		passeLivreRestante := originalData.PasseLivre
 
 		for pagantesRestantes > 0 {
+			// Calcular valores para esta linha
 			pagantesNaLinha := pagantesRestantes / 2
+			idosoNaLinha := idosoRestante / 2
+			passeLivreNaLinha := passeLivreRestante / 2
+
 			if pagantesRestantes < 95 {
 				pagantesNaLinha = pagantesRestantes
+				idosoNaLinha = idosoRestante
+				passeLivreNaLinha = passeLivreRestante
 			}
 
+			// Usar os valores originais para todos os campos, exceto os que estamos dividindo
 			values := []interface{}{
-				data.Empresa, data.CNPJ, data.NomeLinha, data.PrefixoANTT, data.Linha, data.Sentido, data.LocalOrigem, data.LocalDestino,
-				data.Data.Format("02-01-2006"), data.Datainicio.Format("15:04:05"), data.Placa,
+				originalData.Empresa,
+				originalData.CNPJ,
+				originalData.NomeLinha,
+				originalData.PrefixoANTT,
+				originalData.Linha,
+				originalData.Sentido,
+				originalData.LocalOrigem,
+				originalData.LocalDestino,
+				originalData.Data.Format("02-01-2006"),
+				originalData.Datainicio.Format("15:04:05"),
+				originalData.Placa,
 				strconv.Itoa(pagantesNaLinha),
-				strconv.Itoa(data.Idoso),
-				strconv.Itoa(data.PasseLivre),
-				strconv.Itoa(data.JovemBaixaRenda),
+				strconv.Itoa(idosoNaLinha),
+				strconv.Itoa(passeLivreNaLinha),
+				strconv.Itoa(originalData.JovemBaixaRenda),
 			}
 
+			// Escrever a linha no Excel
 			for i, v := range values {
 				col := string(rune('A' + i))
 				f.SetCellValue(sheetName, col+strconv.Itoa(row), v)
 			}
 
+			// Atualizar os valores restantes
 			pagantesRestantes -= pagantesNaLinha
+			idosoRestante -= idosoNaLinha
+			passeLivreRestante -= passeLivreNaLinha
 			row++
 
-			if data.Sentido == "DF-GO" {
-				data.Sentido = "GO-DF"
-				data.LocalOrigem, data.LocalDestino = data.LocalDestino, data.LocalOrigem
+			// Alternar o sentido para a próxima linha
+			if originalData.Sentido == "DF-GO" {
+				originalData.Sentido = "GO-DF"
+				originalData.LocalOrigem, originalData.LocalDestino = originalData.LocalDestino, originalData.LocalOrigem
 			} else {
-				data.Sentido = "DF-GO"
-				data.LocalOrigem, data.LocalDestino = data.LocalDestino, data.LocalOrigem
+				originalData.Sentido = "DF-GO"
+				originalData.LocalOrigem, originalData.LocalDestino = originalData.LocalDestino, originalData.LocalOrigem
 			}
 
-			data.Datainicio = data.Datainicio.Add(2*time.Hour + 13*time.Minute)
-			data.Idoso = data.Idoso / 2
-			data.PasseLivre = data.PasseLivre / 2
-			data.JovemBaixaRenda = 0
+			// Adicionar tempo para a próxima linha
+			originalData.Datainicio = originalData.Datainicio.Add(2*time.Hour + 13*time.Minute)
 		}
 	}
-
 	if err := f.SaveAs(excelPath); err != nil {
 		log.Fatal("Erro ao salvar arquivo Excel:", err)
 	}
