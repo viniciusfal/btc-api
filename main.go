@@ -274,15 +274,23 @@ func ProcessXML(filePath string) (string, error) {
 		f.SetRowHeight(sheetName, 1, 32)
 	}
 
+	// Dentro da função ProcessXML, na parte onde você escreve os dados agrupados:
 	row := 2
 
 	for _, data := range groupedData {
 		// Criar uma cópia dos dados originais para não modificar o original
 		originalData := *data
 
+		// Inicializar variáveis para controle da divisão
 		pagantesRestantes := originalData.Pagantes
 		idosoRestante := originalData.Idoso
 		passeLivreRestante := originalData.PasseLivre
+
+		// Manter controle do sentido original
+		currentSentido := originalData.Sentido
+		currentLocalOrigem := originalData.LocalOrigem
+		currentLocalDestino := originalData.LocalDestino
+		currentDatainicio := originalData.Datainicio
 
 		for pagantesRestantes > 0 {
 			// Calcular valores para esta linha
@@ -296,18 +304,18 @@ func ProcessXML(filePath string) (string, error) {
 				passeLivreNaLinha = passeLivreRestante
 			}
 
-			// Usar os valores originais para todos os campos, exceto os que estamos dividindo
+			// Usar os valores corretos para todos os campos
 			values := []interface{}{
 				originalData.Empresa,
 				originalData.CNPJ,
-				originalData.NomeLinha,
-				originalData.PrefixoANTT,
-				originalData.Linha,
-				originalData.Sentido,
-				originalData.LocalOrigem,
-				originalData.LocalDestino,
+				originalData.NomeLinha,   // Nome da linha mantido
+				originalData.PrefixoANTT, // Prefixo mantido
+				originalData.Linha,       // Código mantido
+				currentSentido,           // Sentido atualizado
+				currentLocalOrigem,       // Local de origem atualizado
+				currentLocalDestino,      // Local de destino atualizado
 				originalData.Data.Format("02-01-2006"),
-				originalData.Datainicio.Format("15:04:05"),
+				currentDatainicio.Format("15:04:05"), // Horário atualizado
 				originalData.Placa,
 				strconv.Itoa(pagantesNaLinha),
 				strconv.Itoa(idosoNaLinha),
@@ -328,16 +336,16 @@ func ProcessXML(filePath string) (string, error) {
 			row++
 
 			// Alternar o sentido para a próxima linha
-			if originalData.Sentido == "DF-GO" {
-				originalData.Sentido = "GO-DF"
-				originalData.LocalOrigem, originalData.LocalDestino = originalData.LocalDestino, originalData.LocalOrigem
+			if currentSentido == "DF-GO" {
+				currentSentido = "GO-DF"
+				currentLocalOrigem, currentLocalDestino = originalData.LocalDestino, originalData.LocalOrigem
 			} else {
-				originalData.Sentido = "DF-GO"
-				originalData.LocalOrigem, originalData.LocalDestino = originalData.LocalDestino, originalData.LocalOrigem
+				currentSentido = "DF-GO"
+				currentLocalOrigem, currentLocalDestino = originalData.LocalOrigem, originalData.LocalDestino
 			}
 
 			// Adicionar tempo para a próxima linha
-			originalData.Datainicio = originalData.Datainicio.Add(2*time.Hour + 13*time.Minute)
+			currentDatainicio = currentDatainicio.Add(2*time.Hour + 13*time.Minute)
 		}
 	}
 	if err := f.SaveAs(excelPath); err != nil {
