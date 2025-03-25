@@ -316,7 +316,7 @@ func ProcessXML(filePath string) (string, error) {
 
 			if data.Sentido == "DF-GO" {
 				data.Sentido = "GO-DF"
-				data.LocalOrigem = local1cd
+				data.LocalOrigem = local1
 				data.LocalDestino = local2
 			} else {
 				data.Sentido = "DF-GO"
