@@ -135,7 +135,6 @@ func main() {
 	}
 	router.Run(":" + port)
 }
-
 func ProcessXML(filePath string) (string, error) {
 	limb := Access()
 	plate := PlacaV()
@@ -156,7 +155,8 @@ func ProcessXML(filePath string) (string, error) {
 
 	for _, btc := range btcs.Btc {
 		for _, operacao := range btc.Operacoes.Operacao {
-			key := btc.CodigoTD + "_" + operacao.Datainicio
+			// Modifiquei a chave para incluir mais campos que identificam unicamente cada operação
+			key := btc.CodigoTD + "_" + operacao.Datainicio + "_" + operacao.Veiculo + "_" + operacao.Linha
 
 			totalPassageiros, _ := strconv.Atoi(operacao.TotalPassageiros)
 
@@ -177,7 +177,6 @@ func ProcessXML(filePath string) (string, error) {
 				sentido = "DF-GO"
 			}
 
-			// Variáveis locais para cada operação
 			var local1, local2, nomeLinha, linhaCerta, prefixoANTT string
 			if linha, existe := limb[operacao.Linha]; existe {
 				if sentido == "GO-DF" {
@@ -235,6 +234,7 @@ func ProcessXML(filePath string) (string, error) {
 		}
 	}
 
+	// Restante do código permanece igual...
 	excelPath := "output.xlsx"
 	f := excelize.NewFile()
 
@@ -274,9 +274,7 @@ func ProcessXML(filePath string) (string, error) {
 		f.SetRowHeight(sheetName, 1, 32)
 	}
 
-	// Dentro da função ProcessXML, na parte onde você escreve os dados agrupados:
 	row := 2
-
 	for _, data := range groupedData {
 		values := []interface{}{
 			data.Empresa,
@@ -302,6 +300,7 @@ func ProcessXML(filePath string) (string, error) {
 		}
 		row++
 	}
+
 	if err := f.SaveAs(excelPath); err != nil {
 		log.Fatal("Erro ao salvar arquivo Excel:", err)
 	}
