@@ -135,6 +135,7 @@ func main() {
 	}
 	router.Run(":" + port)
 }
+
 func ProcessXML(filePath string) (string, error) {
 	limb := Access()
 	plate := PlacaV()
@@ -155,8 +156,7 @@ func ProcessXML(filePath string) (string, error) {
 
 	for _, btc := range btcs.Btc {
 		for _, operacao := range btc.Operacoes.Operacao {
-			// Modifiquei a chave para incluir mais campos que identificam unicamente cada operação
-			key := btc.CodigoTD + "_" + operacao.Datainicio + "_" + operacao.Veiculo + "_" + operacao.Linha
+			key := btc.CodigoTD + "_" + operacao.Datainicio
 
 			totalPassageiros, _ := strconv.Atoi(operacao.TotalPassageiros)
 
@@ -177,6 +177,7 @@ func ProcessXML(filePath string) (string, error) {
 				sentido = "DF-GO"
 			}
 
+			// Variáveis locais para cada operação
 			var local1, local2, nomeLinha, linhaCerta, prefixoANTT string
 			if linha, existe := limb[operacao.Linha]; existe {
 				if sentido == "GO-DF" {
@@ -234,7 +235,6 @@ func ProcessXML(filePath string) (string, error) {
 		}
 	}
 
-	// Restante do código permanece igual...
 	excelPath := "output.xlsx"
 	f := excelize.NewFile()
 
@@ -274,33 +274,80 @@ func ProcessXML(filePath string) (string, error) {
 		f.SetRowHeight(sheetName, 1, 32)
 	}
 
+	// Dentro da função ProcessXML, na parte onde você escreve os dados agrupados:
 	row := 2
+
 	for _, data := range groupedData {
-		values := []interface{}{
-			data.Empresa,
-			data.CNPJ,
-			data.NomeLinha,
-			data.PrefixoANTT,
-			data.Linha,
-			data.Sentido,
-			data.LocalOrigem,
-			data.LocalDestino,
-			data.Data.Format("02-01-2006"),
-			data.Datainicio.Format("15:04:05"),
-			data.Placa,
-			strconv.Itoa(data.Pagantes),
-			strconv.Itoa(data.Idoso),
-			strconv.Itoa(data.PasseLivre),
-			strconv.Itoa(data.JovemBaixaRenda),
-		}
+		// Criar uma cópia dos dados originais para não modificar o original
+		originalData := *data
 
-		for i, v := range values {
-			col := string(rune('A' + i))
-			f.SetCellValue(sheetName, col+strconv.Itoa(row), v)
+		// Inicializar variáveis para controle da divisão
+		pagantesRestantes := originalData.Pagantes
+		idosoRestante := originalData.Idoso
+		passeLivreRestante := originalData.PasseLivre
+
+		// Manter controle do sentido original
+		currentSentido := originalData.Sentido
+		currentLocalOrigem := originalData.LocalOrigem
+		currentLocalDestino := originalData.LocalDestino
+		currentDatainicio := originalData.Datainicio
+
+		for pagantesRestantes > 0 {
+			// Calcular valores para esta linha
+			pagantesNaLinha := pagantesRestantes / 2
+			idosoNaLinha := idosoRestante / 2
+			passeLivreNaLinha := passeLivreRestante / 2
+
+			if pagantesRestantes < 95 {
+				pagantesNaLinha = pagantesRestantes
+				idosoNaLinha = idosoRestante
+				passeLivreNaLinha = passeLivreRestante
+			}
+
+			// Usar os valores corretos para todos os campos
+			values := []interface{}{
+				originalData.Empresa,
+				originalData.CNPJ,
+				originalData.NomeLinha,   // Nome da linha mantido
+				originalData.PrefixoANTT, // Prefixo mantido
+				originalData.Linha,       // Código mantido
+				currentSentido,           // Sentido atualizado
+				currentLocalOrigem,       // Local de origem atualizado
+				currentLocalDestino,      // Local de destino atualizado
+				originalData.Data.Format("02-01-2006"),
+				currentDatainicio.Format("15:04:05"), // Horário atualizado
+				originalData.Placa,
+				strconv.Itoa(pagantesNaLinha),
+				strconv.Itoa(idosoNaLinha),
+				strconv.Itoa(passeLivreNaLinha),
+				strconv.Itoa(originalData.JovemBaixaRenda),
+			}
+
+			// Escrever a linha no Excel
+			for i, v := range values {
+				col := string(rune('A' + i))
+				f.SetCellValue(sheetName, col+strconv.Itoa(row), v)
+			}
+
+			// Atualizar os valores restantes
+			pagantesRestantes -= pagantesNaLinha
+			idosoRestante -= idosoNaLinha
+			passeLivreRestante -= passeLivreNaLinha
+			row++
+
+			// Alternar o sentido para a próxima linha
+			if currentSentido == "DF-GO" {
+				currentSentido = "GO-DF"
+				currentLocalOrigem, currentLocalDestino = originalData.LocalDestino, originalData.LocalOrigem
+			} else {
+				currentSentido = "DF-GO"
+				currentLocalOrigem, currentLocalDestino = originalData.LocalOrigem, originalData.LocalDestino
+			}
+
+			// Adicionar tempo para a próxima linha
+			currentDatainicio = currentDatainicio.Add(2*time.Hour + 13*time.Minute)
 		}
-		row++
 	}
-
 	if err := f.SaveAs(excelPath); err != nil {
 		log.Fatal("Erro ao salvar arquivo Excel:", err)
 	}
