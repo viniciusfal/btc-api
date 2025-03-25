@@ -79,6 +79,7 @@ type GroupedData struct {
 	NomeLinha       string
 	PrefixoANTT     string
 	Sentido         string
+	Veiculo         string
 	LocalOrigem     string
 	LocalDestino    string
 	Data            time.Time
@@ -212,7 +213,7 @@ func ProcessXML(filePath string) (string, error) {
 					Data:            d,
 					Nome:            btc.Nome,
 					CodigoTD:        btc.CodigoTD,
-					Linha:           operacao.Linha,
+					Veiculo:         operacao.Linha,
 					LocalOrigem:     local1,
 					LocalDestino:    local2,
 					Placa:           placa,
@@ -281,6 +282,7 @@ func ProcessXML(filePath string) (string, error) {
 		f.SetCellStyle(sheetName, col+"1", col+"1", headerStyle)
 
 		f.SetRowHeight(sheetName, 1, 32)
+
 	}
 
 	row := 2
@@ -291,7 +293,7 @@ func ProcessXML(filePath string) (string, error) {
 
 		for pagantesRestantes > 0 {
 			pagantesNaLinha := pagantesRestantes / 2
-			if pagantesRestantes < 94 {
+			if pagantesRestantes < 95 {
 				pagantesNaLinha = pagantesRestantes
 			}
 
