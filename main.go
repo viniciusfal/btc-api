@@ -274,6 +274,34 @@ func ProcessXML(filePath string) (string, error) {
 		f.SetRowHeight(sheetName, 1, 32)
 	}
 
+	// Dentro da função ProcessXML, na parte onde você escreve os dados agrupados:
+	row := 2
+
+	for _, data := range groupedData {
+		values := []interface{}{
+			data.Empresa,
+			data.CNPJ,
+			data.NomeLinha,
+			data.PrefixoANTT,
+			data.Linha,
+			data.Sentido,
+			data.LocalOrigem,
+			data.LocalDestino,
+			data.Data.Format("02-01-2006"),
+			data.Datainicio.Format("15:04:05"),
+			data.Placa,
+			strconv.Itoa(data.Pagantes),
+			strconv.Itoa(data.Idoso),
+			strconv.Itoa(data.PasseLivre),
+			strconv.Itoa(data.JovemBaixaRenda),
+		}
+
+		for i, v := range values {
+			col := string(rune('A' + i))
+			f.SetCellValue(sheetName, col+strconv.Itoa(row), v)
+		}
+		row++
+	}
 	if err := f.SaveAs(excelPath); err != nil {
 		log.Fatal("Erro ao salvar arquivo Excel:", err)
 	}
