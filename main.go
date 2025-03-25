@@ -93,20 +93,14 @@ type GroupedData struct {
 	JovemBaixaRenda int
 }
 
-var local1 string
-var local2 string
-var nomeLinha string
-var linhaCerta string
-var prefixoANTT string
-
 func main() {
 	router := gin.Default()
 
 	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"https://dadosdedemanda.vercel.app"}, // Permitir requisições do frontend
+		AllowOrigins:     []string{"https://dadosdedemanda.vercel.app"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Disposition"}, // Para permitir download de arquivos
+		ExposeHeaders:    []string{"Content-Disposition"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -137,10 +131,9 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3333" // Porta padrão local
+		port = "3333"
 	}
 	router.Run(":" + port)
-
 }
 
 func ProcessXML(filePath string) (string, error) {
@@ -163,9 +156,7 @@ func ProcessXML(filePath string) (string, error) {
 
 	for _, btc := range btcs.Btc {
 		for _, operacao := range btc.Operacoes.Operacao {
-			key := btc.CodigoTD + "_" + operacao.Datainicio // Chave única para agrupar
-
-			// Converte os valores para somar
+			key := btc.CodigoTD + "_" + operacao.Datainicio
 
 			totalPassageiros, _ := strconv.Atoi(operacao.TotalPassageiros)
 
@@ -186,6 +177,8 @@ func ProcessXML(filePath string) (string, error) {
 				sentido = "DF-GO"
 			}
 
+			// Variáveis locais para cada operação
+			var local1, local2, nomeLinha, linhaCerta, prefixoANTT string
 			if linha, existe := limb[operacao.Linha]; existe {
 				if sentido == "GO-DF" {
 					local1 = linha.Local1
@@ -200,7 +193,6 @@ func ProcessXML(filePath string) (string, error) {
 			}
 
 			var placa string
-
 			if plateV, exist := plate[operacao.Veiculo]; exist {
 				placa = plateV.Placa
 			}
@@ -243,7 +235,6 @@ func ProcessXML(filePath string) (string, error) {
 		}
 	}
 
-	// Criando o arquivo CSV
 	excelPath := "output.xlsx"
 	f := excelize.NewFile()
 
@@ -271,7 +262,6 @@ func ProcessXML(filePath string) (string, error) {
 		log.Fatal("Erro ao criar estilo de cabeçalho:", err)
 	}
 
-	// Escrevendo o cabeçalho
 	headers := []string{
 		"Empresa", "CNPJ", "Nome da Linha", "Prefixo", "Codigo", "Sentido", "Local de Origem", "Local de Destino", "Dia", "Horário", "Placa", "Pagantes",
 		"Idosos", "Passe Livre", "Jovem de Baixa renda",
@@ -280,16 +270,12 @@ func ProcessXML(filePath string) (string, error) {
 	for i, h := range headers {
 		col := string(rune('A' + i))
 		f.SetCellValue(sheetName, col+"1", h)
-
 		f.SetCellStyle(sheetName, col+"1", col+"1", headerStyle)
-
 		f.SetRowHeight(sheetName, 1, 32)
-
 	}
 
 	row := 2
 
-	// Escrevendo os dados agrupados
 	for _, data := range groupedData {
 		pagantesRestantes := data.Pagantes
 
@@ -318,19 +304,16 @@ func ProcessXML(filePath string) (string, error) {
 
 			if data.Sentido == "DF-GO" {
 				data.Sentido = "GO-DF"
-				data.LocalOrigem = local1
-				data.LocalDestino = local2
+				data.LocalOrigem, data.LocalDestino = data.LocalDestino, data.LocalOrigem
 			} else {
 				data.Sentido = "DF-GO"
-				data.LocalOrigem = local2
-				data.LocalDestino = local1
+				data.LocalOrigem, data.LocalDestino = data.LocalDestino, data.LocalOrigem
 			}
 
 			data.Datainicio = data.Datainicio.Add(2*time.Hour + 13*time.Minute)
 			data.Idoso = data.Idoso / 2
 			data.PasseLivre = data.PasseLivre / 2
 			data.JovemBaixaRenda = 0
-
 		}
 	}
 
