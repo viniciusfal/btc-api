@@ -213,7 +213,7 @@ func ProcessXML(filePath string) (string, error) {
 					Data:            d,
 					Nome:            btc.Nome,
 					CodigoTD:        btc.CodigoTD,
-					Veiculo:         operacao.Linha,
+					Linha:           key,
 					LocalOrigem:     local1,
 					LocalDestino:    local2,
 					Placa:           placa,
@@ -316,7 +316,7 @@ func ProcessXML(filePath string) (string, error) {
 
 			if data.Sentido == "DF-GO" {
 				data.Sentido = "GO-DF"
-				data.LocalOrigem = local1
+				data.LocalOrigem = local1cd
 				data.LocalDestino = local2
 			} else {
 				data.Sentido = "DF-GO"
