@@ -96,6 +96,7 @@ type GroupedData struct {
 var local1 string
 var local2 string
 var nomeLinha string
+var linhaCerta string
 var prefixoANTT string
 
 func main() {
@@ -194,6 +195,7 @@ func ProcessXML(filePath string) (string, error) {
 					local2 = linha.Local1
 				}
 				nomeLinha = linha.Linha
+				linhaCerta = linha.Cod
 				prefixoANTT = linha.CodANTT
 			}
 
@@ -213,7 +215,7 @@ func ProcessXML(filePath string) (string, error) {
 					Data:            d,
 					Nome:            btc.Nome,
 					CodigoTD:        btc.CodigoTD,
-					Linha:           key,
+					Linha:           linhaCerta,
 					LocalOrigem:     local1,
 					LocalDestino:    local2,
 					Placa:           placa,
