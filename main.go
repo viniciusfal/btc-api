@@ -213,7 +213,7 @@ func ProcessXML(filePath string) (string, error) {
 					Data:            d,
 					Nome:            btc.Nome,
 					CodigoTD:        btc.CodigoTD,
-					Veiculo:         operacao.Veiculo,
+					Veiculo:         operacao.Linha,
 					LocalOrigem:     local1,
 					LocalDestino:    local2,
 					Placa:           placa,
@@ -293,12 +293,12 @@ func ProcessXML(filePath string) (string, error) {
 
 		for pagantesRestantes > 0 {
 			pagantesNaLinha := pagantesRestantes / 2
-			if pagantesRestantes < 95 {
+			if pagantesRestantes < 94 {
 				pagantesNaLinha = pagantesRestantes
 			}
 
 			values := []interface{}{
-				data.Empresa, data.CNPJ, data.NomeLinha, data.PrefixoANTT, data.Veiculo, data.Sentido, data.LocalOrigem, data.LocalDestino,
+				data.Empresa, data.CNPJ, data.NomeLinha, data.PrefixoANTT, data.Linha, data.Sentido, data.LocalOrigem, data.LocalDestino,
 				data.Data.Format("02-01-2006"), data.Datainicio.Format("15:04:05"), data.Placa,
 				strconv.Itoa(pagantesNaLinha),
 				strconv.Itoa(data.Idoso),
