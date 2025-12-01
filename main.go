@@ -1,16 +1,21 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/csv"
 	"encoding/xml"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/xuri/excelize/v2"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type Btcs struct {
@@ -73,31 +78,139 @@ type Coletas struct {
 }
 
 type GroupedData struct {
-	CodigoTD        string
-	Empresa         string
-	CNPJ            string
-	NomeLinha       string
-	PrefixoANTT     string
-	Sentido         string
-	Veiculo         string
-	LocalOrigem     string
-	LocalDestino    string
-	Data            time.Time
-	Datainicio      time.Time
-	Nome            string
-	Linha           string
-	Placa           string
-	Pagantes        int
-	Idoso           int
-	PasseLivre      int
-	JovemBaixaRenda int
+	Empresa             string
+	PrefixoANTT         string
+	Linha               string
+	Sentido             string
+	DataInicioViagem    time.Time
+	HoraInicioViagem    string
+	HoraFinalViagem     string
+	QtePaxPagantes      int
+	Idoso               int
+	PasseLivre          int
+	QteOutrasGratuidade int
+	QteTotalPax         int
+	QtePagoDinheiro     int
+	QtePagoEletronico   int
+	DistanciaViagem     int
+	TempoViagem         string
+	VelocidadeMedia     float64
+	LtAberturaViagem    string
+	LgAberturaViagem    string
+	LtFechamentoViagem  string
+	LgFechamentoViagem  string
+	VeiculoNumero       string
+	CPFRodoviario       string
+}
+
+var (
+	cpfCache      = make(map[string]string)
+	cpfCacheLock  sync.RWMutex
+	dbPool        *sql.DB
+	dbPoolOnce    sync.Once
+	dbPoolInitErr error
+)
+
+// getDBConnection retorna o pool de conexões com o banco de dados PostgreSQL
+func getDBConnection() (*sql.DB, error) {
+	dbPoolOnce.Do(func() {
+		databaseURL := os.Getenv("DATABASE_PUBLIC_URL")
+		if databaseURL == "" {
+			dbPoolInitErr = fmt.Errorf("DATABASE_PUBLIC_URL não configurada")
+			return
+		}
+
+		var err error
+		dbPool, err = sql.Open("postgres", databaseURL)
+		if err != nil {
+			dbPoolInitErr = fmt.Errorf("erro ao abrir conexão com banco: %w", err)
+			return
+		}
+
+		if err = dbPool.Ping(); err != nil {
+			dbPool.Close()
+			dbPool = nil
+			dbPoolInitErr = fmt.Errorf("erro ao conectar com banco: %w", err)
+			return
+		}
+
+		// Configurar pool de conexões
+		dbPool.SetMaxOpenConns(25)
+		dbPool.SetMaxIdleConns(5)
+		dbPool.SetConnMaxLifetime(5 * time.Minute)
+	})
+
+	if dbPoolInitErr != nil {
+		return nil, dbPoolInitErr
+	}
+
+	if dbPool == nil {
+		return nil, fmt.Errorf("pool de conexões não inicializado")
+	}
+
+	return dbPool, nil
+}
+
+// getCPFByCodIdentificador busca o CPF na tabela pessoa usando o código identificador
+func getCPFByCodIdentificador(codIdentificador string) (string, error) {
+	// Verificar cache primeiro
+	cpfCacheLock.RLock()
+	if cpf, exists := cpfCache[codIdentificador]; exists {
+		cpfCacheLock.RUnlock()
+		return cpf, nil
+	}
+	cpfCacheLock.RUnlock()
+
+	// Buscar no banco de dados
+	db, err := getDBConnection()
+	if err != nil {
+		// Se não conseguir conectar, retornar string vazia (não bloquear processamento)
+		return "", nil
+	}
+
+	if db == nil {
+		// Se db for nil, retornar string vazia
+		return "", nil
+	}
+
+	var cpf sql.NullString
+	query := "SELECT cpf FROM pessoa WHERE cod_identificador = $1"
+	err = db.QueryRow(query, codIdentificador).Scan(&cpf)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Não encontrou, salvar string vazia no cache
+			cpfCacheLock.Lock()
+			cpfCache[codIdentificador] = ""
+			cpfCacheLock.Unlock()
+			return "", nil
+		}
+		return "", fmt.Errorf("erro ao consultar CPF: %w", err)
+	}
+
+	cpfValue := ""
+	if cpf.Valid {
+		cpfValue = cpf.String
+	}
+
+	// Salvar no cache
+	cpfCacheLock.Lock()
+	cpfCache[codIdentificador] = cpfValue
+	cpfCacheLock.Unlock()
+
+	return cpfValue, nil
 }
 
 func main() {
+	// Carregar variáveis de ambiente do arquivo .env
+	if err := godotenv.Load(); err != nil {
+		// Se não encontrar .env, continua normalmente (pode estar usando variáveis do sistema)
+		fmt.Println("Aviso: arquivo .env não encontrado, usando variáveis de ambiente do sistema")
+	}
+
 	router := gin.Default()
 
 	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"https://dadosdedemanda.vercel.app"},
+		AllowOrigins:     []string{"https://dadosdedemanda.vercel.app", "http://localhost:3000"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type", "Authorization"},
 		ExposeHeaders:    []string{"Content-Disposition"},
@@ -118,15 +231,15 @@ func main() {
 			return
 		}
 
-		excelPath, err := ProcessXML(filepath)
+		csvPath, err := ProcessXML(filepath)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.Header("Content-Disposition", "attachment; filename=output.xlsx")
-		c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-		c.File(excelPath)
+		c.Header("Content-Disposition", "attachment; filename=output.csv")
+		c.Header("Content-Type", "text/csv; charset=utf-8")
+		c.File(csvPath)
 	})
 
 	port := os.Getenv("PORT")
@@ -138,7 +251,7 @@ func main() {
 
 func ProcessXML(filePath string) (string, error) {
 	limb := Access()
-	plate := PlacaV()
+	placas := PlacaV()
 
 	file, err := os.ReadFile(filePath)
 	if err != nil {
@@ -151,206 +264,216 @@ func ProcessXML(filePath string) (string, error) {
 		return "", err
 	}
 
-	groupedData := make(map[string]*GroupedData)
+	var operacoesData []GroupedData
 	linhaCount := make(map[string]int)
 
 	for _, btc := range btcs.Btc {
 		for _, operacao := range btc.Operacoes.Operacao {
-			key := btc.CodigoTD + "_" + operacao.Datainicio
-
-			totalPassageiros, _ := strconv.Atoi(operacao.TotalPassageiros)
-
-			d, err := time.Parse("2006-01-02", btc.Data)
+			// Parse das datas
+			dataInicio, err := time.Parse("2006-01-02 15:04:05", operacao.Datainicio)
 			if err != nil {
 				return "", err
 			}
 
-			h, err := time.Parse("2006-01-02 15:04:05", operacao.Datainicio)
+			dataFim, err := time.Parse("2006-01-02 15:04:05", operacao.Datafim)
 			if err != nil {
 				return "", err
 			}
 
+			// Calcular sentido
 			linhaCount[operacao.Linha]++
-
 			sentido := "GO-DF"
 			if linhaCount[operacao.Linha]%2 == 0 {
 				sentido = "DF-GO"
 			}
 
-			// Variáveis locais para cada operação
-			var local1, local2, nomeLinha, linhaCerta, prefixoANTT string
+			// Buscar informações da linha
+			var linhaCerta, prefixoANTT string
+			var latAbertura, lngAbertura, latFechamento, lngFechamento string
 			if linha, existe := limb[operacao.Linha]; existe {
-				if sentido == "GO-DF" {
-					local1 = linha.Local1
-					local2 = linha.Local2
-				} else {
-					local1 = linha.Local2
-					local2 = linha.Local1
-				}
-				nomeLinha = linha.Linha
 				linhaCerta = linha.Cod
-				prefixoANTT = linha.CodANTT
-			}
+				prefixoANTT = strings.ReplaceAll(linha.CodANTT, "-", "")
 
-			var placa string
-			if plateV, exist := plate[operacao.Veiculo]; exist {
-				placa = plateV.Placa
-			}
-
-			if _, exists := groupedData[key]; !exists {
-				groupedData[key] = &GroupedData{
-					Empresa:         "Amazonia Inter",
-					CNPJ:            "12.647.487/0001-88",
-					NomeLinha:       nomeLinha,
-					PrefixoANTT:     prefixoANTT,
-					Sentido:         sentido,
-					Data:            d,
-					Nome:            btc.Nome,
-					CodigoTD:        btc.CodigoTD,
-					Linha:           linhaCerta,
-					LocalOrigem:     local1,
-					LocalDestino:    local2,
-					Placa:           placa,
-					Pagantes:        totalPassageiros,
-					Datainicio:      h,
-					Idoso:           0,
-					PasseLivre:      0,
-					JovemBaixaRenda: 0,
+				// Preencher coordenadas baseado no sentido da viagem
+				if sentido == "GO-DF" {
+					// Sentido ida: Local1 → abertura, Local2 → fechamento
+					latAbertura = linha.Lat1
+					lngAbertura = linha.Lng1
+					latFechamento = linha.Lat2
+					lngFechamento = linha.Lng2
+				} else {
+					// Sentido volta (DF-GO): Local2 → abertura, Local1 → fechamento
+					latAbertura = linha.Lat2
+					lngAbertura = linha.Lng2
+					latFechamento = linha.Lat1
+					lngFechamento = linha.Lng1
 				}
 			}
 
+			// Buscar placa do veículo
+			veiculoPlaca := operacao.Veiculo
+			if car, existe := placas[operacao.Veiculo]; existe {
+				veiculoPlaca = car.Placa
+			}
+
+			// Buscar CPF do motorista no banco de dados usando código identificador
+			cpfFormatado := ""
+			cpf, err := getCPFByCodIdentificador(btc.Matdmtu)
+			if err == nil && cpf != "" {
+				// Formatar CPF (remover pontos e traços, deixar apenas números)
+				cpfFormatado = strings.ReplaceAll(cpf, ".", "")
+				cpfFormatado = strings.ReplaceAll(cpfFormatado, "-", "")
+			}
+
+			// Inicializar contadores
+			qteTipo1 := 0 // VT (eletrônico)
+			qteTipo2 := 0 // Comum (eletrônico)
+			qteTipo3 := 0 // Passe Livre
+			qteTipo4 := 0 // Dinheiro
+			qteTipo5 := 0 // Idoso
+			qteTipo6 := 0 // Funcionário
+
+			// Processar passageiros
 			for _, passageiro := range operacao.Passageiros.Passageiro {
 				qtd, _ := strconv.Atoi(passageiro.Qtd)
-
-				if passageiro.Tipo == "6" {
-					groupedData[key].Idoso += qtd
-					groupedData[key].Pagantes -= qtd
-				}
-
-				if passageiro.Tipo == "5" {
-					groupedData[key].PasseLivre += qtd
-					groupedData[key].Pagantes -= qtd
+				switch passageiro.Tipo {
+				case "1":
+					qteTipo1 += qtd
+				case "2":
+					qteTipo2 += qtd
+				case "3":
+					qteTipo3 += qtd
+				case "4":
+					qteTipo4 += qtd
+				case "5":
+					qteTipo5 += qtd
+				case "6":
+					qteTipo6 += qtd
 				}
 			}
+
+			// Calcular totais
+			qtePaxPagantes := qteTipo1 + qteTipo2 + qteTipo4
+			qteTotalPax, _ := strconv.Atoi(operacao.TotalPassageiros)
+
+			// Calcular tempo de viagem em formato hh:mm:ss
+			duracao := dataFim.Sub(dataInicio)
+			horas := int(duracao.Hours())
+			minutos := int(duracao.Minutes()) % 60
+			segundos := int(duracao.Seconds()) % 60
+			tempoViagem := fmt.Sprintf("%02d:%02d:%02d", horas, minutos, segundos)
+
+			// Extrair apenas a data (sem hora)
+			dataInicioViagem := time.Date(dataInicio.Year(), dataInicio.Month(), dataInicio.Day(), 0, 0, 0, 0, dataInicio.Location())
+
+			// Extrair apenas as horas
+			horaInicioViagem := dataInicio.Format("15:04:05")
+			horaFinalViagem := dataFim.Format("15:04:05")
+
+			// Criar estrutura de dados
+			operacaoData := GroupedData{
+				Empresa:             "Amazonia Inter Turismo LTDA",
+				PrefixoANTT:         prefixoANTT,
+				Linha:               linhaCerta,
+				Sentido:             sentido,
+				DataInicioViagem:    dataInicioViagem,
+				HoraInicioViagem:    horaInicioViagem,
+				HoraFinalViagem:     horaFinalViagem,
+				QtePaxPagantes:      qtePaxPagantes,
+				Idoso:               qteTipo5,
+				PasseLivre:          qteTipo3,
+				QteOutrasGratuidade: qteTipo6,
+				QteTotalPax:         qteTotalPax,
+				QtePagoDinheiro:     qteTipo4,
+				QtePagoEletronico:   qteTipo1 + qteTipo2,
+				DistanciaViagem:     0,
+				TempoViagem:         tempoViagem,
+				VelocidadeMedia:     0,
+				LtAberturaViagem:    latAbertura,
+				LgAberturaViagem:    lngAbertura,
+				LtFechamentoViagem:  latFechamento,
+				LgFechamentoViagem:  lngFechamento,
+				VeiculoNumero:       veiculoPlaca,
+				CPFRodoviario:       cpfFormatado,
+			}
+
+			operacoesData = append(operacoesData, operacaoData)
 		}
 	}
 
-	excelPath := "output.xlsx"
-	f := excelize.NewFile()
-
-	sheetName := "Dados de Demanda"
-	f.SetSheetName("Sheet1", sheetName)
-
-	headerStyle, err := f.NewStyle(&excelize.Style{
-		Fill: excelize.Fill{
-			Type:    "pattern",
-			Color:   []string{"#059669"},
-			Pattern: 1,
-		},
-		Font: &excelize.Font{
-			Bold:  true,
-			Color: "#ffffff",
-			Size:  12,
-		},
-		Alignment: &excelize.Alignment{
-			Vertical:        "center",
-			JustifyLastLine: true,
-		},
-	})
-
+	csvPath := "output.csv"
+	csvFile, err := os.Create(csvPath)
 	if err != nil {
-		log.Fatal("Erro ao criar estilo de cabeçalho:", err)
+		return "", err
 	}
+	defer csvFile.Close()
+
+	writer := csv.NewWriter(csvFile)
+	writer.Comma = ';'
+	defer writer.Flush()
 
 	headers := []string{
-		"Empresa", "CNPJ", "Nome da Linha", "Prefixo", "Codigo", "Sentido", "Local de Origem", "Local de Destino", "Dia", "Horário", "Placa", "Pagantes",
-		"Idosos", "Passe Livre", "Jovem de Baixa renda",
+		"EMPRESA",
+		"PREFIXO",
+		"CODIGO_LINHA",
+		"SENTIDO",
+		"DATA_INICIO_VIAGEM",
+		"HORA_INICIO_VIAGEM",
+		"HORA_FINAL_VIAGEM",
+		"QTE_PAX_PAGANTES",
+		"QTE_IDOSO",
+		"QTE_PL",
+		"QTE_OUTRAS_GRATUIDADE",
+		"QTE_TOTAL_PAX",
+		"QTE_PAGO_DINHEIRO",
+		"QTE_PAGO_ELETRONICO",
+		"DISTANCIA_VIAGEM",
+		"TEMPO_VIAGEM",
+		"VELOCIDADE_MEDIA",
+		"LT_ABERTURA_VIAGEM",
+		"LG_ABERTURA_VIAGEM",
+		"LT_FECHAMENTO_VIAGEM",
+		"LG_FECHAMENTO_VIAGEM",
+		"VEICULO_NUMERO",
+		"CPF_RODOVIARIO",
 	}
 
-	for i, h := range headers {
-		col := string(rune('A' + i))
-		f.SetCellValue(sheetName, col+"1", h)
-		f.SetCellStyle(sheetName, col+"1", col+"1", headerStyle)
-		f.SetRowHeight(sheetName, 1, 32)
+	if err := writer.Write(headers); err != nil {
+		return "", err
 	}
 
-	// Dentro da função ProcessXML, na parte onde você escreve os dados agrupados:
-	row := 2
+	// Escrever dados - uma linha por operação
+	for _, data := range operacoesData {
+		values := []string{
+			data.Empresa,
+			data.PrefixoANTT,
+			data.Linha,
+			data.Sentido,
+			data.DataInicioViagem.Format("02/01/2006"),
+			data.HoraInicioViagem,
+			data.HoraFinalViagem,
+			strconv.Itoa(data.QtePaxPagantes),
+			strconv.Itoa(data.Idoso),
+			strconv.Itoa(data.PasseLivre),
+			strconv.Itoa(data.QteOutrasGratuidade),
+			strconv.Itoa(data.QteTotalPax),
+			strconv.Itoa(data.QtePagoDinheiro),
+			strconv.Itoa(data.QtePagoEletronico),
+			strconv.Itoa(data.DistanciaViagem),
+			data.TempoViagem,
+			strconv.FormatFloat(data.VelocidadeMedia, 'f', 2, 64),
+			data.LtAberturaViagem,
+			data.LgAberturaViagem,
+			data.LtFechamentoViagem,
+			data.LgFechamentoViagem,
+			data.VeiculoNumero,
+			data.CPFRodoviario,
+		}
 
-	for _, data := range groupedData {
-		// Criar uma cópia dos dados originais para não modificar o original
-		originalData := *data
-
-		// Inicializar variáveis para controle da divisão
-		pagantesRestantes := originalData.Pagantes
-		idosoRestante := originalData.Idoso
-		passeLivreRestante := originalData.PasseLivre
-
-		// Manter controle do sentido original
-		currentSentido := originalData.Sentido
-		currentLocalOrigem := originalData.LocalOrigem
-		currentLocalDestino := originalData.LocalDestino
-		currentDatainicio := originalData.Datainicio
-
-		for pagantesRestantes > 0 {
-			// Calcular valores para esta linha
-			pagantesNaLinha := pagantesRestantes / 2
-			idosoNaLinha := idosoRestante / 2
-			passeLivreNaLinha := passeLivreRestante / 2
-
-			if pagantesRestantes < 95 {
-				pagantesNaLinha = pagantesRestantes
-				idosoNaLinha = idosoRestante
-				passeLivreNaLinha = passeLivreRestante
-			}
-
-			// Usar os valores corretos para todos os campos
-			values := []interface{}{
-				originalData.Empresa,
-				originalData.CNPJ,
-				originalData.NomeLinha,   // Nome da linha mantido
-				originalData.PrefixoANTT, // Prefixo mantido
-				originalData.Linha,       // Código mantido
-				currentSentido,           // Sentido atualizado
-				currentLocalOrigem,       // Local de origem atualizado
-				currentLocalDestino,      // Local de destino atualizado
-				originalData.Data.Format("02-01-2006"),
-				currentDatainicio.Format("15:04:05"), // Horário atualizado
-				originalData.Placa,
-				strconv.Itoa(pagantesNaLinha),
-				strconv.Itoa(idosoNaLinha),
-				strconv.Itoa(passeLivreNaLinha),
-				strconv.Itoa(originalData.JovemBaixaRenda),
-			}
-
-			// Escrever a linha no Excel
-			for i, v := range values {
-				col := string(rune('A' + i))
-				f.SetCellValue(sheetName, col+strconv.Itoa(row), v)
-			}
-
-			// Atualizar os valores restantes
-			pagantesRestantes -= pagantesNaLinha
-			idosoRestante -= idosoNaLinha
-			passeLivreRestante -= passeLivreNaLinha
-			row++
-
-			// Alternar o sentido para a próxima linha
-			if currentSentido == "DF-GO" {
-				currentSentido = "GO-DF"
-				currentLocalOrigem, currentLocalDestino = originalData.LocalDestino, originalData.LocalOrigem
-			} else {
-				currentSentido = "DF-GO"
-				currentLocalOrigem, currentLocalDestino = originalData.LocalOrigem, originalData.LocalDestino
-			}
-
-			// Adicionar tempo para a próxima linha
-			currentDatainicio = currentDatainicio.Add(2*time.Hour + 13*time.Minute)
+		if err := writer.Write(values); err != nil {
+			return "", err
 		}
 	}
-	if err := f.SaveAs(excelPath); err != nil {
-		log.Fatal("Erro ao salvar arquivo Excel:", err)
-	}
 
-	return excelPath, nil
+	return csvPath, nil
 }
