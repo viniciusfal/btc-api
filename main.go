@@ -133,14 +133,34 @@ func getDBConnection() (*sql.DB, error) {
 			return
 		}
 
+		// Log da URL de conexão (sem senha para segurança)
+		urlForLog := databaseURL
+		if strings.Contains(urlForLog, "@") {
+			parts := strings.Split(urlForLog, "@")
+			if len(parts) > 0 {
+				// Ocultar senha na URL
+				userPass := strings.Split(parts[0], "://")
+				if len(userPass) > 1 {
+					userParts := strings.Split(userPass[1], ":")
+					if len(userParts) > 1 {
+						urlForLog = userPass[0] + "://" + userParts[0] + ":***@" + parts[1]
+					}
+				}
+			}
+		}
+		log.Printf("URL de conexão (senha oculta): %s", urlForLog)
+
 		// Adicionar parâmetro SSL se não estiver presente na URL
+		// Railway geralmente fornece a URL completa, mas se não tiver sslmode, usamos 'prefer' (mais flexível)
 		if !strings.Contains(databaseURL, "sslmode=") {
 			separator := "?"
 			if strings.Contains(databaseURL, "?") {
 				separator = "&"
 			}
-			databaseURL = databaseURL + separator + "sslmode=require"
-			log.Printf("Parâmetro SSL adicionado à connection string")
+			databaseURL = databaseURL + separator + "sslmode=prefer"
+			log.Printf("Parâmetro SSL adicionado à connection string (sslmode=prefer)")
+		} else {
+			log.Printf("URL já contém parâmetros SSL, usando configuração original")
 		}
 
 		log.Printf("Tentando conectar ao banco de dados...")
