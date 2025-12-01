@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/xml"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -114,25 +115,53 @@ var (
 // getDBConnection retorna o pool de conexões com o banco de dados PostgreSQL
 func getDBConnection() (*sql.DB, error) {
 	dbPoolOnce.Do(func() {
-		databaseURL := os.Getenv("DATABASE_PUBLIC_URL")
+		// Tentar múltiplas variáveis de ambiente na ordem de prioridade
+		var databaseURL string
+		envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
+
+		for _, envVar := range envVars {
+			databaseURL = os.Getenv(envVar)
+			if databaseURL != "" {
+				log.Printf("Variável de ambiente encontrada: %s", envVar)
+				break
+			}
+		}
+
 		if databaseURL == "" {
-			dbPoolInitErr = fmt.Errorf("DATABASE_PUBLIC_URL não configurada")
+			dbPoolInitErr = fmt.Errorf("nenhuma variável de ambiente de banco encontrada (DATABASE_URL, POSTGRES_URL, DATABASE_PUBLIC_URL)")
+			log.Printf("ERRO: %v", dbPoolInitErr)
 			return
 		}
 
+		// Adicionar parâmetro SSL se não estiver presente na URL
+		if !strings.Contains(databaseURL, "sslmode=") {
+			separator := "?"
+			if strings.Contains(databaseURL, "?") {
+				separator = "&"
+			}
+			databaseURL = databaseURL + separator + "sslmode=require"
+			log.Printf("Parâmetro SSL adicionado à connection string")
+		}
+
+		log.Printf("Tentando conectar ao banco de dados...")
 		var err error
 		dbPool, err = sql.Open("postgres", databaseURL)
 		if err != nil {
 			dbPoolInitErr = fmt.Errorf("erro ao abrir conexão com banco: %w", err)
+			log.Printf("ERRO ao abrir conexão: %v", dbPoolInitErr)
 			return
 		}
 
+		log.Printf("Testando conexão com Ping...")
 		if err = dbPool.Ping(); err != nil {
 			dbPool.Close()
 			dbPool = nil
-			dbPoolInitErr = fmt.Errorf("erro ao conectar com banco: %w", err)
+			dbPoolInitErr = fmt.Errorf("erro ao conectar com banco (Ping falhou): %w", err)
+			log.Printf("ERRO no Ping: %v", dbPoolInitErr)
 			return
 		}
+
+		log.Printf("Conexão com banco de dados estabelecida com sucesso!")
 
 		// Configurar pool de conexões
 		dbPool.SetMaxOpenConns(25)
@@ -164,32 +193,40 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	// Buscar no banco de dados
 	db, err := getDBConnection()
 	if err != nil {
+		log.Printf("ERRO ao obter conexão com banco para código %s: %v", codIdentificador, err)
 		// Se não conseguir conectar, retornar string vazia (não bloquear processamento)
 		return "", nil
 	}
 
 	if db == nil {
+		log.Printf("ERRO: conexão com banco é nil para código %s", codIdentificador)
 		// Se db for nil, retornar string vazia
 		return "", nil
 	}
 
 	var cpf sql.NullString
 	query := "SELECT cpf FROM pessoa WHERE cod_identificador = $1"
+	log.Printf("Consultando CPF para código identificador: %s", codIdentificador)
 	err = db.QueryRow(query, codIdentificador).Scan(&cpf)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			log.Printf("CPF não encontrado para código identificador: %s", codIdentificador)
 			// Não encontrou, salvar string vazia no cache
 			cpfCacheLock.Lock()
 			cpfCache[codIdentificador] = ""
 			cpfCacheLock.Unlock()
 			return "", nil
 		}
+		log.Printf("ERRO ao consultar CPF para código %s: %v", codIdentificador, err)
 		return "", fmt.Errorf("erro ao consultar CPF: %w", err)
 	}
 
 	cpfValue := ""
 	if cpf.Valid {
 		cpfValue = cpf.String
+		log.Printf("CPF encontrado para código %s: %s", codIdentificador, cpfValue)
+	} else {
+		log.Printf("CPF é NULL para código identificador: %s", codIdentificador)
 	}
 
 	// Salvar no cache
@@ -217,6 +254,69 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	// Endpoint de health check para testar conexão com banco
+	router.GET("/health/db", func(c *gin.Context) {
+		db, err := getDBConnection()
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":  "error",
+				"message": "Não foi possível conectar ao banco de dados",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		// Testar query simples
+		var result int
+		err = db.QueryRow("SELECT 1").Scan(&result)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":  "error",
+				"message": "Conexão estabelecida, mas query de teste falhou",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		// Testar se a tabela pessoa existe
+		var tableExists bool
+		err = db.QueryRow(`
+			SELECT EXISTS (
+				SELECT FROM information_schema.tables 
+				WHERE table_schema = 'public' 
+				AND table_name = 'pessoa'
+			)
+		`).Scan(&tableExists)
+
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"status":      "connected",
+				"message":     "Conexão OK, mas não foi possível verificar tabela pessoa",
+				"query_test":  "OK",
+				"table_check": "error",
+				"error":       err.Error(),
+			})
+			return
+		}
+
+		// Contar registros na tabela pessoa se existir
+		var count int
+		if tableExists {
+			err = db.QueryRow("SELECT COUNT(*) FROM pessoa").Scan(&count)
+			if err != nil {
+				count = -1
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":       "connected",
+			"message":      "Conexão com banco de dados OK",
+			"query_test":   "OK",
+			"table_exists": tableExists,
+			"pessoa_count": count,
+		})
+	})
 
 	router.POST("/upload", func(c *gin.Context) {
 		file, err := c.FormFile("file")
@@ -319,10 +419,14 @@ func ProcessXML(filePath string) (string, error) {
 			// Buscar CPF do motorista no banco de dados usando código identificador
 			cpfFormatado := ""
 			cpf, err := getCPFByCodIdentificador(btc.Matdmtu)
-			if err == nil && cpf != "" {
+			if err != nil {
+				log.Printf("Erro ao buscar CPF para %s: %v", btc.Matdmtu, err)
+			} else if cpf != "" {
 				// Formatar CPF (remover pontos e traços, deixar apenas números)
 				cpfFormatado = strings.ReplaceAll(cpf, ".", "")
 				cpfFormatado = strings.ReplaceAll(cpfFormatado, "-", "")
+			} else {
+				log.Printf("CPF vazio ou não encontrado para código identificador: %s", btc.Matdmtu)
 			}
 
 			// Inicializar contadores
