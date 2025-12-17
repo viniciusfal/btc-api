@@ -151,8 +151,9 @@ func getDBConnection() (*sql.DB, error) {
 		}
 		log.Printf("URL de conexão (senha oculta): %s", urlForLog)
 
-		// Adicionar parâmetro SSL se não estiver presente na URL
+		// Adicionar parâmetros SSL se não estiverem presentes na URL
 		// lib/pq só suporta: require (default), verify-full, verify-ca, e disable
+		// Adicionar sslmode=require e sslrootcert para evitar avisos de ALPN
 		if !strings.Contains(databaseURL, "sslmode=") {
 			separator := "?"
 			if strings.Contains(databaseURL, "?") {
@@ -162,6 +163,15 @@ func getDBConnection() (*sql.DB, error) {
 			log.Printf("Parâmetro SSL adicionado à connection string (sslmode=require)")
 		} else {
 			log.Printf("URL já contém parâmetros SSL, usando configuração original")
+		}
+
+		// Adicionar fallback_application_name para melhorar compatibilidade
+		if !strings.Contains(databaseURL, "fallback_application_name=") {
+			separator := "&"
+			if !strings.Contains(databaseURL, "?") {
+				separator = "?"
+			}
+			databaseURL = databaseURL + separator + "fallback_application_name=btc-api"
 		}
 
 		log.Printf("Tentando conectar ao banco de dados...")
@@ -272,14 +282,21 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	// Buscar no banco de dados
 	db, err := getDBConnection()
 	if err != nil {
-		log.Printf("ERRO ao obter conexão com banco para código %s: %v", codIdentificador, err)
+		log.Printf("ERRO CRÍTICO ao obter conexão com banco para código %s: %v", codIdentificador, err)
+		log.Printf("ERRO: Verificar variáveis de ambiente DATABASE_URL, POSTGRES_URL ou DATABASE_PUBLIC_URL")
 		// Se não conseguir conectar, retornar string vazia (não bloquear processamento)
 		return "", nil
 	}
 
 	if db == nil {
-		log.Printf("ERRO: conexão com banco é nil para código %s", codIdentificador)
+		log.Printf("ERRO CRÍTICO: conexão com banco é nil para código %s. Banco não foi inicializado.", codIdentificador)
 		// Se db for nil, retornar string vazia
+		return "", nil
+	}
+
+	// Testar conexão com um ping rápido
+	if err := db.Ping(); err != nil {
+		log.Printf("ERRO: Conexão com banco está inativa (Ping falhou) para código %s: %v", codIdentificador, err)
 		return "", nil
 	}
 
@@ -370,6 +387,11 @@ func main() {
 		codigo := c.Param("codigo")
 		log.Printf("DEBUG: Testando consulta de CPF para código: %s", codigo)
 
+		// Limpar cache para forçar nova busca
+		cpfCacheLock.Lock()
+		delete(cpfCache, codigo)
+		cpfCacheLock.Unlock()
+
 		db, err := getDBConnection()
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -444,15 +466,36 @@ func main() {
 			}
 		}
 
+		// Testar também usando a função getCPFByCodIdentificador
+		cpfFromFunction, errFromFunction := getCPFByCodIdentificador(codigo)
+
 		c.JSON(http.StatusOK, gin.H{
-			"status":           "success",
-			"total_records":    totalRecords,
-			"codigo":           codigo,
-			"cpf":              cpfValue,
-			"cpf_valid":        cpf.Valid,
-			"query_param":      queryParam,
-			"query_param_type": fmt.Sprintf("%T", queryParam),
-			"sample_records":   sampleRecords,
+			"status":            "success",
+			"total_records":     totalRecords,
+			"codigo":            codigo,
+			"cpf_direct_query":  cpfValue,
+			"cpf_from_function": cpfFromFunction,
+			"cpf_valid":         cpf.Valid,
+			"query_param":       queryParam,
+			"query_param_type":  fmt.Sprintf("%T", queryParam),
+			"sample_records":    sampleRecords,
+			"function_error": func() string {
+				if errFromFunction != nil {
+					return errFromFunction.Error()
+				}
+				return ""
+			}(),
+		})
+	})
+
+	// Endpoint para limpar cache de CPF (útil para debug)
+	router.DELETE("/debug/cpf/cache", func(c *gin.Context) {
+		cpfCacheLock.Lock()
+		cpfCache = make(map[string]string)
+		cpfCacheLock.Unlock()
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": "Cache de CPF limpo",
 		})
 	})
 
@@ -704,7 +747,18 @@ func ProcessXML(filePath string) (string, error) {
 					lat2 = linha.Lat1
 					lng2 = linha.Lng1
 				}
-				distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
+
+				// Verificar se coordenadas estão preenchidas
+				if lat1 == "" || lng1 == "" || lat2 == "" || lng2 == "" {
+					log.Printf("AVISO: Coordenadas incompletas para linha %s (sentido %s): lat1=%s, lng1=%s, lat2=%s, lng2=%s",
+						operacao.Linha, sentido, lat1, lng1, lat2, lng2)
+				} else {
+					distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
+					log.Printf("Distância calculada para linha %s (sentido %s): %.2f km (coords: %s,%s → %s,%s)",
+						operacao.Linha, sentido, distanciaKm, lat1, lng1, lat2, lng2)
+				}
+			} else {
+				log.Printf("ERRO: Linha %s não encontrada em access.go, distância será 0", operacao.Linha)
 			}
 
 			// Calcular tempo de viagem com limitação máxima (problema: motorista não inverte turno)
@@ -720,6 +774,15 @@ func ProcessXML(filePath string) (string, error) {
 			var velocidadeMedia float64
 			if distanciaKm > 0 && tempoHoras > 0 {
 				velocidadeMedia = distanciaKm / tempoHoras
+				log.Printf("Velocidade média calculada para linha %s: %.2f km/h (distância: %.2f km, tempo: %.2f h)",
+					operacao.Linha, velocidadeMedia, distanciaKm, tempoHoras)
+			} else {
+				if distanciaKm == 0 {
+					log.Printf("AVISO: Distância é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
+				}
+				if tempoHoras == 0 {
+					log.Printf("AVISO: Tempo é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
+				}
 			}
 
 			// Extrair apenas a data (sem hora)
