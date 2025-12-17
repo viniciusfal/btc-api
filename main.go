@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -93,7 +94,7 @@ type GroupedData struct {
 	QteTotalPax         int
 	QtePagoDinheiro     int
 	QtePagoEletronico   int
-	DistanciaViagem     int
+	DistanciaViagem     float64
 	TempoViagem         string
 	VelocidadeMedia     float64
 	LtAberturaViagem    string
@@ -151,14 +152,14 @@ func getDBConnection() (*sql.DB, error) {
 		log.Printf("URL de conexão (senha oculta): %s", urlForLog)
 
 		// Adicionar parâmetro SSL se não estiver presente na URL
-		// Railway geralmente fornece a URL completa, mas se não tiver sslmode, usamos 'prefer' (mais flexível)
+		// lib/pq só suporta: require (default), verify-full, verify-ca, e disable
 		if !strings.Contains(databaseURL, "sslmode=") {
 			separator := "?"
 			if strings.Contains(databaseURL, "?") {
 				separator = "&"
 			}
-			databaseURL = databaseURL + separator + "sslmode=prefer"
-			log.Printf("Parâmetro SSL adicionado à connection string (sslmode=prefer)")
+			databaseURL = databaseURL + separator + "sslmode=require"
+			log.Printf("Parâmetro SSL adicionado à connection string (sslmode=require)")
 		} else {
 			log.Printf("URL já contém parâmetros SSL, usando configuração original")
 		}
@@ -183,6 +184,24 @@ func getDBConnection() (*sql.DB, error) {
 
 		log.Printf("Conexão com banco de dados estabelecida com sucesso!")
 
+		// Criar tabela pessoa se não existir (estrutura real: id_pessoa como PK, cod_identificador como campo)
+		createTableSQL := `
+			CREATE TABLE IF NOT EXISTS pessoa (
+				id_pessoa SERIAL PRIMARY KEY,
+				cod_identificador INTEGER NOT NULL,
+				cpf VARCHAR(14),
+				funcao VARCHAR(100),
+				status BOOLEAN DEFAULT true
+			);
+			CREATE INDEX IF NOT EXISTS idx_pessoa_cod_identificador ON pessoa(cod_identificador);
+		`
+		_, err = dbPool.Exec(createTableSQL)
+		if err != nil {
+			log.Printf("AVISO: Erro ao criar tabela pessoa (pode já existir): %v", err)
+		} else {
+			log.Printf("Tabela pessoa verificada/criada com sucesso")
+		}
+
 		// Configurar pool de conexões
 		dbPool.SetMaxOpenConns(25)
 		dbPool.SetMaxIdleConns(5)
@@ -198,6 +217,46 @@ func getDBConnection() (*sql.DB, error) {
 	}
 
 	return dbPool, nil
+}
+
+// calculateGeographicDistance calcula a distância entre duas coordenadas geográficas usando a fórmula de Haversine
+// Retorna a distância em quilômetros
+func calculateGeographicDistance(lat1, lng1, lat2, lng2 string) float64 {
+	// Converter strings para float64
+	lat1Float, err1 := strconv.ParseFloat(lat1, 64)
+	lng1Float, err2 := strconv.ParseFloat(lng1, 64)
+	lat2Float, err3 := strconv.ParseFloat(lat2, 64)
+	lng2Float, err4 := strconv.ParseFloat(lng2, 64)
+
+	// Se houver erro na conversão, retornar 0
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		log.Printf("Erro ao converter coordenadas: lat1=%s, lng1=%s, lat2=%s, lng2=%s", lat1, lng1, lat2, lng2)
+		return 0
+	}
+
+	// Raio médio da Terra em quilômetros
+	const R = 6371.0
+
+	// Converter graus para radianos
+	lat1Rad := lat1Float * math.Pi / 180.0
+	lng1Rad := lng1Float * math.Pi / 180.0
+	lat2Rad := lat2Float * math.Pi / 180.0
+	lng2Rad := lng2Float * math.Pi / 180.0
+
+	// Diferenças
+	dLat := lat2Rad - lat1Rad
+	dLng := lng2Rad - lng1Rad
+
+	// Fórmula de Haversine
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(dLng/2)*math.Sin(dLng/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	// Distância em quilômetros
+	distance := R * c
+
+	return distance
 }
 
 // getCPFByCodIdentificador busca o CPF na tabela pessoa usando o código identificador
@@ -224,10 +283,36 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 		return "", nil
 	}
 
+	// Verificar se código identificador está vazio
+	if codIdentificador == "" {
+		log.Printf("ERRO: código identificador está vazio")
+		cpfCacheLock.Lock()
+		cpfCache[codIdentificador] = ""
+		cpfCacheLock.Unlock()
+		return "", nil
+	}
+
+	// Converter código identificador para inteiro
+	codInt, errConv := strconv.Atoi(codIdentificador)
+
 	var cpf sql.NullString
 	query := "SELECT cpf FROM pessoa WHERE cod_identificador = $1"
-	log.Printf("Consultando CPF para código identificador: %s", codIdentificador)
-	err = db.QueryRow(query, codIdentificador).Scan(&cpf)
+
+	// Usar inteiro se a conversão foi bem-sucedida, senão usar string
+	var queryParam interface{}
+	if errConv == nil {
+		// Conversão bem-sucedida, usar inteiro
+		queryParam = codInt
+		log.Printf("Consultando CPF para código identificador: '%s' (convertido para INTEGER: %d)", codIdentificador, codInt)
+	} else {
+		// Falha na conversão, tentar como string
+		queryParam = codIdentificador
+		log.Printf("AVISO: Não foi possível converter código '%s' para inteiro, tentando como STRING: %v", codIdentificador, errConv)
+	}
+
+	log.Printf("Executando query: %s com parâmetro: %v (tipo: %T)", query, queryParam, queryParam)
+
+	err = db.QueryRow(query, queryParam).Scan(&cpf)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			log.Printf("CPF não encontrado para código identificador: %s", codIdentificador)
@@ -244,9 +329,14 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	cpfValue := ""
 	if cpf.Valid {
 		cpfValue = cpf.String
-		log.Printf("CPF encontrado para código %s: %s", codIdentificador, cpfValue)
+		log.Printf("CPF encontrado para código %s: '%s' (tamanho: %d)", codIdentificador, cpfValue, len(cpfValue))
 	} else {
 		log.Printf("CPF é NULL para código identificador: %s", codIdentificador)
+	}
+
+	// Verificar se CPF está vazio mesmo após encontrar registro
+	if cpfValue == "" {
+		log.Printf("AVISO: CPF encontrado mas está vazio para código %s. Verificar se o campo CPF está preenchido no banco.", codIdentificador)
 	}
 
 	// Salvar no cache
@@ -274,6 +364,97 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	// Endpoint de debug para testar consulta de CPF
+	router.GET("/debug/cpf/:codigo", func(c *gin.Context) {
+		codigo := c.Param("codigo")
+		log.Printf("DEBUG: Testando consulta de CPF para código: %s", codigo)
+
+		db, err := getDBConnection()
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":  "error",
+				"message": "Não foi possível conectar ao banco de dados",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		// Converter para inteiro
+		codInt, errConv := strconv.Atoi(codigo)
+		var queryParam interface{}
+		if errConv == nil {
+			queryParam = codInt
+		} else {
+			queryParam = codigo
+		}
+
+		var cpf sql.NullString
+		query := "SELECT cpf FROM pessoa WHERE cod_identificador = $1"
+		err = db.QueryRow(query, queryParam).Scan(&cpf)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusOK, gin.H{
+					"status":           "not_found",
+					"message":          fmt.Sprintf("CPF não encontrado para código: %s", codigo),
+					"codigo":           codigo,
+					"query_param":      queryParam,
+					"query_param_type": fmt.Sprintf("%T", queryParam),
+				})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":      "error",
+				"message":     "Erro ao consultar CPF",
+				"error":       err.Error(),
+				"codigo":      codigo,
+				"query_param": queryParam,
+			})
+			return
+		}
+
+		cpfValue := ""
+		if cpf.Valid {
+			cpfValue = cpf.String
+		}
+
+		// Testar também uma consulta para ver todos os registros
+		var totalRecords int
+		db.QueryRow("SELECT COUNT(*) FROM pessoa").Scan(&totalRecords)
+
+		rows, _ := db.Query("SELECT cod_identificador, cpf FROM pessoa LIMIT 10")
+		var sampleRecords []map[string]interface{}
+		if rows != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var cod int
+				var cpfSample sql.NullString
+				if err := rows.Scan(&cod, &cpfSample); err == nil {
+					cpfStr := ""
+					if cpfSample.Valid {
+						cpfStr = cpfSample.String
+					}
+					sampleRecords = append(sampleRecords, map[string]interface{}{
+						"cod_identificador": cod,
+						"cpf":               cpfStr,
+						"cpf_length":        len(cpfStr),
+					})
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":           "success",
+			"total_records":    totalRecords,
+			"codigo":           codigo,
+			"cpf":              cpfValue,
+			"cpf_valid":        cpf.Valid,
+			"query_param":      queryParam,
+			"query_param_type": fmt.Sprintf("%T", queryParam),
+			"sample_records":   sampleRecords,
+		})
+	})
 
 	// Endpoint de health check para testar conexão com banco
 	router.GET("/health/db", func(c *gin.Context) {
@@ -438,15 +619,24 @@ func ProcessXML(filePath string) (string, error) {
 
 			// Buscar CPF do motorista no banco de dados usando código identificador
 			cpfFormatado := ""
-			cpf, err := getCPFByCodIdentificador(btc.Matdmtu)
-			if err != nil {
-				log.Printf("Erro ao buscar CPF para %s: %v", btc.Matdmtu, err)
-			} else if cpf != "" {
-				// Formatar CPF (remover pontos e traços, deixar apenas números)
-				cpfFormatado = strings.ReplaceAll(cpf, ".", "")
-				cpfFormatado = strings.ReplaceAll(cpfFormatado, "-", "")
+
+			// Verificar se Matdmtu está vazio
+			if btc.Matdmtu == "" {
+				log.Printf("AVISO: Matdmtu está vazio para motorista %s, não é possível buscar CPF", btc.Nome)
 			} else {
-				log.Printf("CPF vazio ou não encontrado para código identificador: %s", btc.Matdmtu)
+				log.Printf("Buscando CPF para Matdmtu: '%s' (motorista: %s)", btc.Matdmtu, btc.Nome)
+				cpf, err := getCPFByCodIdentificador(btc.Matdmtu)
+				if err != nil {
+					log.Printf("ERRO ao buscar CPF para Matdmtu %s: %v", btc.Matdmtu, err)
+				} else if cpf != "" {
+					// Formatar CPF (remover pontos e traços, deixar apenas números)
+					cpfOriginal := cpf
+					cpfFormatado = strings.ReplaceAll(cpf, ".", "")
+					cpfFormatado = strings.ReplaceAll(cpfFormatado, "-", "")
+					log.Printf("CPF formatado para Matdmtu %s: '%s' -> '%s'", btc.Matdmtu, cpfOriginal, cpfFormatado)
+				} else {
+					log.Printf("CPF vazio ou não encontrado para Matdmtu: %s (motorista: %s). Verificar se existe registro na tabela pessoa com cod_identificador = %s", btc.Matdmtu, btc.Nome, btc.Matdmtu)
+				}
 			}
 
 			// Inicializar contadores
@@ -476,6 +666,15 @@ func ProcessXML(filePath string) (string, error) {
 				}
 			}
 
+			// Dividir tipo 2 (gratuidade que inclui idoso e passe livre)
+			// 1/3 vai para Passe Livre (tipo 3), 2/3 fica como Idoso (tipo 2)
+			qtePasseLivre := qteTipo2 / 3
+			qteIdoso := qteTipo2 - qtePasseLivre
+
+			// Atualizar contadores: tipo 2 agora é apenas idoso, tipo 3 recebe passe livre
+			qteTipo2 = qteIdoso
+			qteTipo3 = qteTipo3 + qtePasseLivre
+
 			// Calcular totais
 			qtePaxPagantes := qteTipo1 + qteTipo2 + qteTipo4
 			qteTotalPax, _ := strconv.Atoi(operacao.TotalPassageiros)
@@ -486,6 +685,42 @@ func ProcessXML(filePath string) (string, error) {
 			minutos := int(duracao.Minutes()) % 60
 			segundos := int(duracao.Seconds()) % 60
 			tempoViagem := fmt.Sprintf("%02d:%02d:%02d", horas, minutos, segundos)
+
+			// Calcular distância da viagem usando coordenadas geográficas
+			var distanciaKm float64
+			if linha, existe := limb[operacao.Linha]; existe {
+				// Determinar coordenadas baseado no sentido da viagem
+				var lat1, lng1, lat2, lng2 string
+				if sentido == "GO-DF" {
+					// Sentido ida: Local1 → abertura, Local2 → fechamento
+					lat1 = linha.Lat1
+					lng1 = linha.Lng1
+					lat2 = linha.Lat2
+					lng2 = linha.Lng2
+				} else {
+					// Sentido volta (DF-GO): Local2 → abertura, Local1 → fechamento
+					lat1 = linha.Lat2
+					lng1 = linha.Lng2
+					lat2 = linha.Lat1
+					lng2 = linha.Lng1
+				}
+				distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
+			}
+
+			// Calcular tempo de viagem com limitação máxima (problema: motorista não inverte turno)
+			tempoHoras := duracao.Hours()
+			const TEMPO_MAXIMO_VIAGEM = 3.0 // 3 horas máximo
+			if tempoHoras > TEMPO_MAXIMO_VIAGEM {
+				log.Printf("Tempo de viagem suspeito para linha %s: %.2fh, limitando para %.1fh",
+					operacao.Linha, tempoHoras, TEMPO_MAXIMO_VIAGEM)
+				tempoHoras = TEMPO_MAXIMO_VIAGEM
+			}
+
+			// Calcular velocidade média (km/h)
+			var velocidadeMedia float64
+			if distanciaKm > 0 && tempoHoras > 0 {
+				velocidadeMedia = distanciaKm / tempoHoras
+			}
 
 			// Extrair apenas a data (sem hora)
 			dataInicioViagem := time.Date(dataInicio.Year(), dataInicio.Month(), dataInicio.Day(), 0, 0, 0, 0, dataInicio.Location())
@@ -504,15 +739,15 @@ func ProcessXML(filePath string) (string, error) {
 				HoraInicioViagem:    horaInicioViagem,
 				HoraFinalViagem:     horaFinalViagem,
 				QtePaxPagantes:      qtePaxPagantes,
-				Idoso:               qteTipo5,
-				PasseLivre:          qteTipo3,
+				Idoso:               qteTipo2, // Tipo 2 após divisão (2/3 do tipo 2 original)
+				PasseLivre:          qteTipo3, // Tipo 3 + 1/3 do tipo 2 original
 				QteOutrasGratuidade: qteTipo6,
 				QteTotalPax:         qteTotalPax,
 				QtePagoDinheiro:     qteTipo4,
 				QtePagoEletronico:   qteTipo1 + qteTipo2,
-				DistanciaViagem:     0,
+				DistanciaViagem:     distanciaKm,
 				TempoViagem:         tempoViagem,
-				VelocidadeMedia:     0,
+				VelocidadeMedia:     velocidadeMedia,
 				LtAberturaViagem:    latAbertura,
 				LgAberturaViagem:    lngAbertura,
 				LtFechamentoViagem:  latFechamento,
@@ -583,7 +818,7 @@ func ProcessXML(filePath string) (string, error) {
 			strconv.Itoa(data.QteTotalPax),
 			strconv.Itoa(data.QtePagoDinheiro),
 			strconv.Itoa(data.QtePagoEletronico),
-			strconv.Itoa(data.DistanciaViagem),
+			strconv.FormatFloat(data.DistanciaViagem, 'f', 2, 64),
 			data.TempoViagem,
 			strconv.FormatFloat(data.VelocidadeMedia, 'f', 2, 64),
 			data.LtAberturaViagem,
