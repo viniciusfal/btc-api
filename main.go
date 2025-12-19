@@ -16,7 +16,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
@@ -116,6 +115,9 @@ var (
 // getDBConnection retorna o pool de conexões com o banco de dados PostgreSQL
 func getDBConnection() (*sql.DB, error) {
 	dbPoolOnce.Do(func() {
+		// Usar apenas variáveis de ambiente do sistema (Railway)
+		// Não tentar carregar .env - Railway usa variáveis de ambiente diretamente
+
 		// Tentar múltiplas variáveis de ambiente na ordem de prioridade
 		var databaseURL string
 		envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
@@ -125,12 +127,15 @@ func getDBConnection() (*sql.DB, error) {
 			if databaseURL != "" {
 				log.Printf("Variável de ambiente encontrada: %s", envVar)
 				break
+			} else {
+				log.Printf("Variável de ambiente %s não encontrada ou vazia", envVar)
 			}
 		}
 
 		if databaseURL == "" {
 			dbPoolInitErr = fmt.Errorf("nenhuma variável de ambiente de banco encontrada (DATABASE_URL, POSTGRES_URL, DATABASE_PUBLIC_URL)")
-			log.Printf("ERRO: %v", dbPoolInitErr)
+			log.Printf("ERRO CRÍTICO: %v", dbPoolInitErr)
+			log.Printf("ERRO: Verifique se a variável DATABASE_PUBLIC_URL está configurada no ambiente ou no arquivo .env")
 			return
 		}
 
@@ -365,10 +370,36 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 }
 
 func main() {
-	// Carregar variáveis de ambiente do arquivo .env
-	if err := godotenv.Load(); err != nil {
-		// Se não encontrar .env, continua normalmente (pode estar usando variáveis do sistema)
-		fmt.Println("Aviso: arquivo .env não encontrado, usando variáveis de ambiente do sistema")
+	// Usar apenas variáveis de ambiente do sistema (Railway)
+	// Não carregar .env - Railway configura variáveis diretamente no ambiente
+
+	// Verificar se as variáveis de ambiente estão disponíveis
+	envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
+	envFound := false
+	for _, envVar := range envVars {
+		value := os.Getenv(envVar)
+		if value != "" {
+			// Ocultar senha no log
+			urlForLog := value
+			if strings.Contains(urlForLog, "@") {
+				parts := strings.Split(urlForLog, "@")
+				if len(parts) > 0 {
+					userPass := strings.Split(parts[0], "://")
+					if len(userPass) > 1 {
+						userParts := strings.Split(userPass[1], ":")
+						if len(userParts) > 1 {
+							urlForLog = userPass[0] + "://" + userParts[0] + ":***@" + parts[1]
+						}
+					}
+				}
+			}
+			log.Printf("Variável de ambiente %s encontrada: %s", envVar, urlForLog)
+			envFound = true
+			break
+		}
+	}
+	if !envFound {
+		log.Printf("AVISO: Nenhuma variável de ambiente de banco encontrada. Verifique se DATABASE_PUBLIC_URL está configurada.")
 	}
 
 	router := gin.Default()
@@ -381,6 +412,141 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	// Endpoint de diagnóstico completo do banco
+	router.GET("/debug/db", func(c *gin.Context) {
+		envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
+		envStatus := make(map[string]string)
+		for _, envVar := range envVars {
+			value := os.Getenv(envVar)
+			if value != "" {
+				// Ocultar senha
+				if strings.Contains(value, "@") {
+					parts := strings.Split(value, "@")
+					if len(parts) > 0 {
+						userPass := strings.Split(parts[0], "://")
+						if len(userPass) > 1 {
+							userParts := strings.Split(userPass[1], ":")
+							if len(userParts) > 1 {
+								value = userPass[0] + "://" + userParts[0] + ":***@" + parts[1]
+							}
+						}
+					}
+				}
+				envStatus[envVar] = value
+			} else {
+				envStatus[envVar] = "não definida"
+			}
+		}
+
+		db, err := getDBConnection()
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":       "error",
+				"error":        err.Error(),
+				"env_vars":     envStatus,
+				"db_connected": false,
+			})
+			return
+		}
+
+		if db == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":       "error",
+				"error":        "dbPool é nil",
+				"env_vars":     envStatus,
+				"db_connected": false,
+			})
+			return
+		}
+
+		// Testar ping
+		pingErr := db.Ping()
+		if pingErr != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":       "error",
+				"error":        pingErr.Error(),
+				"env_vars":     envStatus,
+				"db_connected": false,
+			})
+			return
+		}
+
+		// Contar registros
+		var totalRecords int
+		db.QueryRow("SELECT COUNT(*) FROM pessoa").Scan(&totalRecords)
+
+		// Buscar alguns registros com CPF
+		rows, _ := db.Query("SELECT id_pessoa, cod_identificador, cpf, funcao, status FROM pessoa WHERE cpf IS NOT NULL AND cpf != '' LIMIT 5")
+		var sampleRecords []map[string]interface{}
+		if rows != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id int
+				var cod int
+				var cpfSample sql.NullString
+				var funcao sql.NullString
+				var status bool
+				if err := rows.Scan(&id, &cod, &cpfSample, &funcao, &status); err == nil {
+					cpfStr := ""
+					if cpfSample.Valid {
+						cpfStr = cpfSample.String
+					}
+					funcaoStr := ""
+					if funcao.Valid {
+						funcaoStr = funcao.String
+					}
+					sampleRecords = append(sampleRecords, map[string]interface{}{
+						"id_pessoa":         id,
+						"cod_identificador": cod,
+						"cpf":               cpfStr,
+						"cpf_length":        len(cpfStr),
+						"funcao":            funcaoStr,
+						"status":            status,
+					})
+				}
+			}
+		}
+
+		// Buscar alguns registros sem CPF
+		rowsNoCPF, _ := db.Query("SELECT id_pessoa, cod_identificador, cpf, funcao FROM pessoa WHERE cpf IS NULL OR cpf = '' LIMIT 5")
+		var recordsNoCPF []map[string]interface{}
+		if rowsNoCPF != nil {
+			defer rowsNoCPF.Close()
+			for rowsNoCPF.Next() {
+				var id int
+				var cod int
+				var cpfSample sql.NullString
+				var funcao sql.NullString
+				if err := rowsNoCPF.Scan(&id, &cod, &cpfSample, &funcao); err == nil {
+					cpfStr := ""
+					if cpfSample.Valid {
+						cpfStr = cpfSample.String
+					}
+					funcaoStr := ""
+					if funcao.Valid {
+						funcaoStr = funcao.String
+					}
+					recordsNoCPF = append(recordsNoCPF, map[string]interface{}{
+						"id_pessoa":         id,
+						"cod_identificador": cod,
+						"cpf":               cpfStr,
+						"cpf_length":        len(cpfStr),
+						"funcao":            funcaoStr,
+					})
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":           "success",
+			"db_connected":     true,
+			"env_vars":         envStatus,
+			"total_records":    totalRecords,
+			"records_with_cpf": sampleRecords,
+			"records_no_cpf":   recordsNoCPF,
+		})
+	})
 
 	// Endpoint de debug para testar consulta de CPF
 	router.GET("/debug/cpf/:codigo", func(c *gin.Context) {
@@ -761,28 +927,55 @@ func ProcessXML(filePath string) (string, error) {
 				log.Printf("ERRO: Linha %s não encontrada em access.go, distância será 0", operacao.Linha)
 			}
 
-			// Calcular tempo de viagem com limitação máxima (problema: motorista não inverte turno)
-			tempoHoras := duracao.Hours()
-			const TEMPO_MAXIMO_VIAGEM = 3.0 // 3 horas máximo
-			if tempoHoras > TEMPO_MAXIMO_VIAGEM {
-				log.Printf("Tempo de viagem suspeito para linha %s: %.2fh, limitando para %.1fh",
-					operacao.Linha, tempoHoras, TEMPO_MAXIMO_VIAGEM)
-				tempoHoras = TEMPO_MAXIMO_VIAGEM
-			}
+			// Calcular tempo de viagem real
+			// Problema: motorista não inverte turno, então o tempo calculado inclui pausas entre viagens
+			tempoHorasCalculado := duracao.Hours()
 
-			// Calcular velocidade média (km/h)
+			// Limites de velocidade para ônibus
+			const VELOCIDADE_MAXIMA_PERMITIDA = 70.0 // km/h (limite legal para ônibus - não pode passar disso)
+			const VELOCIDADE_MEDIA_ESPERADA = 45.0   // km/h (velocidade média típica em rodovia)
+			const VELOCIDADE_MINIMA_ACEITAVEL = 25.0 // km/h (mínimo realista considerando trânsito)
+
+			var tempoHoras float64
 			var velocidadeMedia float64
-			if distanciaKm > 0 && tempoHoras > 0 {
-				velocidadeMedia = distanciaKm / tempoHoras
-				log.Printf("Velocidade média calculada para linha %s: %.2f km/h (distância: %.2f km, tempo: %.2f h)",
-					operacao.Linha, velocidadeMedia, distanciaKm, tempoHoras)
+
+			if distanciaKm > 0 && tempoHorasCalculado > 0 {
+				// Calcular velocidade com o tempo informado
+				velocidadeCalculada := distanciaKm / tempoHorasCalculado
+
+				// Validar velocidade calculada
+				if velocidadeCalculada > VELOCIDADE_MAXIMA_PERMITIDA {
+					// Velocidade acima do permitido = tempo muito curto (impossível)
+					// Recalcular tempo mínimo baseado na velocidade máxima permitida
+					tempoHoras = distanciaKm / VELOCIDADE_MAXIMA_PERMITIDA
+					velocidadeMedia = VELOCIDADE_MAXIMA_PERMITIDA
+					log.Printf("Velocidade impossível para linha %s: %.2f km/h (acima de %.0f km/h). Tempo calculado muito curto (%.2fh). Recalculando com tempo mínimo baseado em %.0f km/h: %.2fh",
+						operacao.Linha, velocidadeCalculada, VELOCIDADE_MAXIMA_PERMITIDA, tempoHorasCalculado, VELOCIDADE_MAXIMA_PERMITIDA, tempoHoras)
+				} else if velocidadeCalculada < VELOCIDADE_MINIMA_ACEITAVEL {
+					// Velocidade muito baixa = tempo muito longo (inclui pausas)
+					// Usar tempo esperado baseado na velocidade média esperada
+					tempoHoras = distanciaKm / VELOCIDADE_MEDIA_ESPERADA
+					velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
+					log.Printf("Velocidade muito baixa para linha %s: %.2f km/h (tempo calculado: %.2fh parece incluir pausas). Usando tempo esperado baseado em velocidade média de %.0f km/h: %.2fh",
+						operacao.Linha, velocidadeCalculada, tempoHorasCalculado, VELOCIDADE_MEDIA_ESPERADA, tempoHoras)
+				} else {
+					// Velocidade dentro da faixa aceitável, usar tempo calculado
+					tempoHoras = tempoHorasCalculado
+					velocidadeMedia = velocidadeCalculada
+					log.Printf("Velocidade média calculada para linha %s: %.2f km/h (distância: %.2f km, tempo: %.2f h)",
+						operacao.Linha, velocidadeMedia, distanciaKm, tempoHoras)
+				}
+			} else if distanciaKm > 0 {
+				// Tempo zero ou inválido, usar tempo esperado baseado na velocidade média
+				tempoHoras = distanciaKm / VELOCIDADE_MEDIA_ESPERADA
+				velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
+				log.Printf("Tempo inválido (%.2fh) para linha %s, usando tempo esperado baseado em velocidade média de %.0f km/h: %.2fh",
+					tempoHorasCalculado, operacao.Linha, VELOCIDADE_MEDIA_ESPERADA, tempoHoras)
 			} else {
-				if distanciaKm == 0 {
-					log.Printf("AVISO: Distância é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
-				}
-				if tempoHoras == 0 {
-					log.Printf("AVISO: Tempo é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
-				}
+				// Distância zero, não pode calcular
+				tempoHoras = 0
+				velocidadeMedia = 0
+				log.Printf("AVISO: Distância é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
 			}
 
 			// Extrair apenas a data (sem hora)
@@ -791,6 +984,10 @@ func ProcessXML(filePath string) (string, error) {
 			// Extrair apenas as horas
 			horaInicioViagem := dataInicio.Format("15:04:05")
 			horaFinalViagem := dataFim.Format("15:04:05")
+
+			// Arredondar distância e velocidade para cima e converter para inteiro
+			distanciaViagemInt := int(math.Ceil(distanciaKm))
+			velocidadeMediaInt := int(math.Ceil(velocidadeMedia))
 
 			// Criar estrutura de dados
 			operacaoData := GroupedData{
@@ -808,9 +1005,9 @@ func ProcessXML(filePath string) (string, error) {
 				QteTotalPax:         qteTotalPax,
 				QtePagoDinheiro:     qteTipo4,
 				QtePagoEletronico:   qteTipo1 + qteTipo2,
-				DistanciaViagem:     distanciaKm,
+				DistanciaViagem:     float64(distanciaViagemInt),
 				TempoViagem:         tempoViagem,
-				VelocidadeMedia:     velocidadeMedia,
+				VelocidadeMedia:     float64(velocidadeMediaInt),
 				LtAberturaViagem:    latAbertura,
 				LgAberturaViagem:    lngAbertura,
 				LtFechamentoViagem:  latFechamento,
@@ -883,7 +1080,7 @@ func ProcessXML(filePath string) (string, error) {
 			strconv.Itoa(data.QtePagoEletronico),
 			strconv.FormatFloat(data.DistanciaViagem, 'f', 2, 64),
 			data.TempoViagem,
-			strconv.FormatFloat(data.VelocidadeMedia, 'f', 2, 64),
+			strconv.Itoa(int(data.VelocidadeMedia)),
 			data.LtAberturaViagem,
 			data.LgAberturaViagem,
 			data.LtFechamentoViagem,
