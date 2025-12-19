@@ -133,10 +133,11 @@ func getDBConnection() (*sql.DB, error) {
 			}
 		}
 
+		// Fallback: usar URL hardcoded se nenhuma variável de ambiente for encontrada
 		if databaseURL == "" {
-			dbPoolInitErr = fmt.Errorf("nenhuma variável de ambiente de banco encontrada (DATABASE_URL, DATABASE_PUBLIC_URL, POSTGRES_URL)")
-			log.Printf("ERRO CRÍTICO: %v - Configure DATABASE_URL (produção) ou DATABASE_PUBLIC_URL (desenvolvimento) nas variáveis de ambiente do Railway", dbPoolInitErr)
-			return
+			databaseURL = "postgresql://postgres:XNcPMtKXjbHZWIboytPDPQkOlQsNqjEL@yamanote.proxy.rlwy.net:45628/railway"
+			foundVar = "hardcoded"
+			log.Printf("AVISO: Nenhuma variável de ambiente encontrada, usando URL hardcoded")
 		}
 
 		// Log apenas uma vez na inicialização (ocultar senha)
@@ -900,7 +901,7 @@ func ProcessXML(filePath string) (string, error) {
 			// Limites de velocidade para ônibus
 			const VELOCIDADE_MAXIMA_PERMITIDA = 70.0 // km/h (limite legal para ônibus - não pode passar disso)
 			const VELOCIDADE_MEDIA_ESPERADA = 45.0   // km/h (velocidade média típica em rodovia)
-			const VELOCIDADE_MINIMA_ACEITAVEL = 25.0 // km/h (mínimo realista considerando trânsito)
+			const VELOCIDADE_MINIMA_ABSOLUTA = 15.0  // km/h (mínimo absoluto - abaixo disso o tempo inclui pausas)
 
 			var velocidadeMedia float64
 
@@ -912,11 +913,12 @@ func ProcessXML(filePath string) (string, error) {
 				if velocidadeCalculada > VELOCIDADE_MAXIMA_PERMITIDA {
 					// Velocidade acima do permitido = tempo muito curto (impossível)
 					velocidadeMedia = VELOCIDADE_MAXIMA_PERMITIDA
-				} else if velocidadeCalculada < VELOCIDADE_MINIMA_ACEITAVEL {
-					// Velocidade muito baixa = tempo muito longo (inclui pausas)
+				} else if velocidadeCalculada < VELOCIDADE_MINIMA_ABSOLUTA {
+					// Velocidade muito baixa (< 15 km/h) = tempo muito longo (inclui pausas)
+					// Usar velocidade média esperada
 					velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
 				} else {
-					// Velocidade dentro da faixa aceitável, usar velocidade calculada
+					// Velocidade dentro da faixa aceitável (15-70 km/h), usar velocidade calculada
 					velocidadeMedia = velocidadeCalculada
 				}
 			} else if distanciaKm > 0 {
