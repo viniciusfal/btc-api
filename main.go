@@ -1144,7 +1144,7 @@ func ProcessXML(filePath string) (string, error) {
 			strconv.Itoa(data.QteTotalPax),
 			strconv.Itoa(data.QtePagoDinheiro),
 			strconv.Itoa(data.QtePagoEletronico),
-			strconv.FormatFloat(data.DistanciaViagem, 'f', 2, 64),
+			strconv.Itoa(int(data.DistanciaViagem)),
 			data.TempoViagem,
 			strconv.Itoa(int(data.VelocidadeMedia)),
 			data.LtAberturaViagem,
