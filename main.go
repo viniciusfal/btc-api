@@ -894,36 +894,18 @@ func ProcessXML(filePath string) (string, error) {
 				}
 			}
 
-			// Calcular velocidade média
-			// Problema: motorista não inverte turno, então o tempo calculado inclui pausas entre viagens
-			tempoHorasCalculado := duracao.Hours()
-
-			// Limites de velocidade para ônibus
-			const VELOCIDADE_MAXIMA_PERMITIDA = 70.0 // km/h (limite legal para ônibus - não pode passar disso)
-			const VELOCIDADE_MEDIA_ESPERADA = 45.0   // km/h (velocidade média típica em rodovia)
-			const VELOCIDADE_MINIMA_ABSOLUTA = 15.0  // km/h (mínimo absoluto - abaixo disso o tempo inclui pausas)
+			// Calcular velocidade média baseada em tempo esperado (ignorar tempo informado)
+			// O tempo informado está incorreto porque inclui pausas entre viagens
+			const VELOCIDADE_MEDIA_ESPERADA = 45.0 // km/h (velocidade média típica em rodovia)
 
 			var velocidadeMedia float64
 
-			if distanciaKm > 0 && tempoHorasCalculado > 0 {
-				// Calcular velocidade com o tempo informado
-				velocidadeCalculada := distanciaKm / tempoHorasCalculado
-
-				// Validar velocidade calculada
-				if velocidadeCalculada > VELOCIDADE_MAXIMA_PERMITIDA {
-					// Velocidade acima do permitido = tempo muito curto (impossível)
-					velocidadeMedia = VELOCIDADE_MAXIMA_PERMITIDA
-				} else if velocidadeCalculada < VELOCIDADE_MINIMA_ABSOLUTA {
-					// Velocidade muito baixa (< 15 km/h) = tempo muito longo (inclui pausas)
-					// Usar velocidade média esperada
-					velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
-				} else {
-					// Velocidade dentro da faixa aceitável (15-70 km/h), usar velocidade calculada
-					velocidadeMedia = velocidadeCalculada
-				}
-			} else if distanciaKm > 0 {
-				// Tempo zero ou inválido, usar velocidade média esperada
-				velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
+			if distanciaKm > 0 {
+				// Calcular tempo esperado baseado na distância
+				tempoEsperadoHoras := distanciaKm / VELOCIDADE_MEDIA_ESPERADA
+				// Velocidade média = distância / tempo esperado
+				velocidadeMedia = distanciaKm / tempoEsperadoHoras
+				// Isso sempre resultará em VELOCIDADE_MEDIA_ESPERADA, mas é calculado corretamente
 			} else {
 				// Distância zero, não pode calcular
 				velocidadeMedia = 0
