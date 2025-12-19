@@ -119,32 +119,31 @@ func getDBConnection() (*sql.DB, error) {
 		// Não tentar carregar .env - Railway usa variáveis de ambiente diretamente
 
 		// Tentar múltiplas variáveis de ambiente na ordem de prioridade
+		// DATABASE_URL: Para produção no Railway (rede privada, mais rápida e segura)
+		// DATABASE_PUBLIC_URL: Para desenvolvimento local ou acesso externo
 		var databaseURL string
-		envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
+		envVars := []string{"DATABASE_URL", "DATABASE_PUBLIC_URL", "POSTGRES_URL"}
+		var foundVar string
 
 		for _, envVar := range envVars {
 			databaseURL = os.Getenv(envVar)
 			if databaseURL != "" {
-				log.Printf("Variável de ambiente encontrada: %s", envVar)
+				foundVar = envVar
 				break
-			} else {
-				log.Printf("Variável de ambiente %s não encontrada ou vazia", envVar)
 			}
 		}
 
 		if databaseURL == "" {
-			dbPoolInitErr = fmt.Errorf("nenhuma variável de ambiente de banco encontrada (DATABASE_URL, POSTGRES_URL, DATABASE_PUBLIC_URL)")
-			log.Printf("ERRO CRÍTICO: %v", dbPoolInitErr)
-			log.Printf("ERRO: Verifique se a variável DATABASE_PUBLIC_URL está configurada no ambiente ou no arquivo .env")
+			dbPoolInitErr = fmt.Errorf("nenhuma variável de ambiente de banco encontrada (DATABASE_URL, DATABASE_PUBLIC_URL, POSTGRES_URL)")
+			log.Printf("ERRO CRÍTICO: %v - Configure DATABASE_URL (produção) ou DATABASE_PUBLIC_URL (desenvolvimento) nas variáveis de ambiente do Railway", dbPoolInitErr)
 			return
 		}
 
-		// Log da URL de conexão (sem senha para segurança)
+		// Log apenas uma vez na inicialização (ocultar senha)
 		urlForLog := databaseURL
 		if strings.Contains(urlForLog, "@") {
 			parts := strings.Split(urlForLog, "@")
 			if len(parts) > 0 {
-				// Ocultar senha na URL
 				userPass := strings.Split(parts[0], "://")
 				if len(userPass) > 1 {
 					userParts := strings.Split(userPass[1], ":")
@@ -154,7 +153,7 @@ func getDBConnection() (*sql.DB, error) {
 				}
 			}
 		}
-		log.Printf("URL de conexão (senha oculta): %s", urlForLog)
+		log.Printf("Banco de dados: variável %s encontrada - %s", foundVar, urlForLog)
 
 		// Adicionar parâmetros SSL se não estiverem presentes na URL
 		// lib/pq só suporta: require (default), verify-full, verify-ca, e disable
@@ -287,27 +286,23 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	// Buscar no banco de dados
 	db, err := getDBConnection()
 	if err != nil {
-		log.Printf("ERRO CRÍTICO ao obter conexão com banco para código %s: %v", codIdentificador, err)
-		log.Printf("ERRO: Verificar variáveis de ambiente DATABASE_URL, POSTGRES_URL ou DATABASE_PUBLIC_URL")
 		// Se não conseguir conectar, retornar string vazia (não bloquear processamento)
+		// Erro já foi logado na inicialização
 		return "", nil
 	}
 
 	if db == nil {
-		log.Printf("ERRO CRÍTICO: conexão com banco é nil para código %s. Banco não foi inicializado.", codIdentificador)
-		// Se db for nil, retornar string vazia
+		// Banco não inicializado, erro já foi logado
 		return "", nil
 	}
 
-	// Testar conexão com um ping rápido
+	// Testar conexão com um ping rápido (silencioso)
 	if err := db.Ping(); err != nil {
-		log.Printf("ERRO: Conexão com banco está inativa (Ping falhou) para código %s: %v", codIdentificador, err)
 		return "", nil
 	}
 
 	// Verificar se código identificador está vazio
 	if codIdentificador == "" {
-		log.Printf("ERRO: código identificador está vazio")
 		cpfCacheLock.Lock()
 		cpfCache[codIdentificador] = ""
 		cpfCacheLock.Unlock()
@@ -323,42 +318,26 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	// Usar inteiro se a conversão foi bem-sucedida, senão usar string
 	var queryParam interface{}
 	if errConv == nil {
-		// Conversão bem-sucedida, usar inteiro
 		queryParam = codInt
-		log.Printf("Consultando CPF para código identificador: '%s' (convertido para INTEGER: %d)", codIdentificador, codInt)
 	} else {
-		// Falha na conversão, tentar como string
 		queryParam = codIdentificador
-		log.Printf("AVISO: Não foi possível converter código '%s' para inteiro, tentando como STRING: %v", codIdentificador, errConv)
 	}
-
-	log.Printf("Executando query: %s com parâmetro: %v (tipo: %T)", query, queryParam, queryParam)
 
 	err = db.QueryRow(query, queryParam).Scan(&cpf)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("CPF não encontrado para código identificador: %s", codIdentificador)
 			// Não encontrou, salvar string vazia no cache
 			cpfCacheLock.Lock()
 			cpfCache[codIdentificador] = ""
 			cpfCacheLock.Unlock()
 			return "", nil
 		}
-		log.Printf("ERRO ao consultar CPF para código %s: %v", codIdentificador, err)
 		return "", fmt.Errorf("erro ao consultar CPF: %w", err)
 	}
 
 	cpfValue := ""
 	if cpf.Valid {
 		cpfValue = cpf.String
-		log.Printf("CPF encontrado para código %s: '%s' (tamanho: %d)", codIdentificador, cpfValue, len(cpfValue))
-	} else {
-		log.Printf("CPF é NULL para código identificador: %s", codIdentificador)
-	}
-
-	// Verificar se CPF está vazio mesmo após encontrar registro
-	if cpfValue == "" {
-		log.Printf("AVISO: CPF encontrado mas está vazio para código %s. Verificar se o campo CPF está preenchido no banco.", codIdentificador)
 	}
 
 	// Salvar no cache
@@ -399,7 +378,7 @@ func main() {
 		}
 	}
 	if !envFound {
-		log.Printf("AVISO: Nenhuma variável de ambiente de banco encontrada. Verifique se DATABASE_PUBLIC_URL está configurada.")
+		log.Printf("AVISO: Nenhuma variável de ambiente de banco encontrada. Configure DATABASE_URL (produção) ou DATABASE_PUBLIC_URL (desenvolvimento) nas variáveis de ambiente do Railway.")
 	}
 
 	router := gin.Default()
@@ -415,7 +394,7 @@ func main() {
 
 	// Endpoint de diagnóstico completo do banco
 	router.GET("/debug/db", func(c *gin.Context) {
-		envVars := []string{"DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"}
+		envVars := []string{"DATABASE_URL", "DATABASE_PUBLIC_URL", "POSTGRES_URL"}
 		envStatus := make(map[string]string)
 		for _, envVar := range envVars {
 			value := os.Getenv(envVar)
@@ -829,22 +808,13 @@ func ProcessXML(filePath string) (string, error) {
 			// Buscar CPF do motorista no banco de dados usando código identificador
 			cpfFormatado := ""
 
-			// Verificar se Matdmtu está vazio
-			if btc.Matdmtu == "" {
-				log.Printf("AVISO: Matdmtu está vazio para motorista %s, não é possível buscar CPF", btc.Nome)
-			} else {
-				log.Printf("Buscando CPF para Matdmtu: '%s' (motorista: %s)", btc.Matdmtu, btc.Nome)
+			// Buscar CPF do motorista (sem logs excessivos)
+			if btc.Matdmtu != "" {
 				cpf, err := getCPFByCodIdentificador(btc.Matdmtu)
-				if err != nil {
-					log.Printf("ERRO ao buscar CPF para Matdmtu %s: %v", btc.Matdmtu, err)
-				} else if cpf != "" {
+				if err == nil && cpf != "" {
 					// Formatar CPF (remover pontos e traços, deixar apenas números)
-					cpfOriginal := cpf
 					cpfFormatado = strings.ReplaceAll(cpf, ".", "")
 					cpfFormatado = strings.ReplaceAll(cpfFormatado, "-", "")
-					log.Printf("CPF formatado para Matdmtu %s: '%s' -> '%s'", btc.Matdmtu, cpfOriginal, cpfFormatado)
-				} else {
-					log.Printf("CPF vazio ou não encontrado para Matdmtu: %s (motorista: %s). Verificar se existe registro na tabela pessoa com cod_identificador = %s", btc.Matdmtu, btc.Nome, btc.Matdmtu)
 				}
 			}
 
@@ -920,14 +890,10 @@ func ProcessXML(filePath string) (string, error) {
 						operacao.Linha, sentido, lat1, lng1, lat2, lng2)
 				} else {
 					distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
-					log.Printf("Distância calculada para linha %s (sentido %s): %.2f km (coords: %s,%s → %s,%s)",
-						operacao.Linha, sentido, distanciaKm, lat1, lng1, lat2, lng2)
 				}
-			} else {
-				log.Printf("ERRO: Linha %s não encontrada em access.go, distância será 0", operacao.Linha)
 			}
 
-			// Calcular tempo de viagem real
+			// Calcular velocidade média
 			// Problema: motorista não inverte turno, então o tempo calculado inclui pausas entre viagens
 			tempoHorasCalculado := duracao.Hours()
 
@@ -936,7 +902,6 @@ func ProcessXML(filePath string) (string, error) {
 			const VELOCIDADE_MEDIA_ESPERADA = 45.0   // km/h (velocidade média típica em rodovia)
 			const VELOCIDADE_MINIMA_ACEITAVEL = 25.0 // km/h (mínimo realista considerando trânsito)
 
-			var tempoHoras float64
 			var velocidadeMedia float64
 
 			if distanciaKm > 0 && tempoHorasCalculado > 0 {
@@ -946,36 +911,20 @@ func ProcessXML(filePath string) (string, error) {
 				// Validar velocidade calculada
 				if velocidadeCalculada > VELOCIDADE_MAXIMA_PERMITIDA {
 					// Velocidade acima do permitido = tempo muito curto (impossível)
-					// Recalcular tempo mínimo baseado na velocidade máxima permitida
-					tempoHoras = distanciaKm / VELOCIDADE_MAXIMA_PERMITIDA
 					velocidadeMedia = VELOCIDADE_MAXIMA_PERMITIDA
-					log.Printf("Velocidade impossível para linha %s: %.2f km/h (acima de %.0f km/h). Tempo calculado muito curto (%.2fh). Recalculando com tempo mínimo baseado em %.0f km/h: %.2fh",
-						operacao.Linha, velocidadeCalculada, VELOCIDADE_MAXIMA_PERMITIDA, tempoHorasCalculado, VELOCIDADE_MAXIMA_PERMITIDA, tempoHoras)
 				} else if velocidadeCalculada < VELOCIDADE_MINIMA_ACEITAVEL {
 					// Velocidade muito baixa = tempo muito longo (inclui pausas)
-					// Usar tempo esperado baseado na velocidade média esperada
-					tempoHoras = distanciaKm / VELOCIDADE_MEDIA_ESPERADA
 					velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
-					log.Printf("Velocidade muito baixa para linha %s: %.2f km/h (tempo calculado: %.2fh parece incluir pausas). Usando tempo esperado baseado em velocidade média de %.0f km/h: %.2fh",
-						operacao.Linha, velocidadeCalculada, tempoHorasCalculado, VELOCIDADE_MEDIA_ESPERADA, tempoHoras)
 				} else {
-					// Velocidade dentro da faixa aceitável, usar tempo calculado
-					tempoHoras = tempoHorasCalculado
+					// Velocidade dentro da faixa aceitável, usar velocidade calculada
 					velocidadeMedia = velocidadeCalculada
-					log.Printf("Velocidade média calculada para linha %s: %.2f km/h (distância: %.2f km, tempo: %.2f h)",
-						operacao.Linha, velocidadeMedia, distanciaKm, tempoHoras)
 				}
 			} else if distanciaKm > 0 {
-				// Tempo zero ou inválido, usar tempo esperado baseado na velocidade média
-				tempoHoras = distanciaKm / VELOCIDADE_MEDIA_ESPERADA
+				// Tempo zero ou inválido, usar velocidade média esperada
 				velocidadeMedia = VELOCIDADE_MEDIA_ESPERADA
-				log.Printf("Tempo inválido (%.2fh) para linha %s, usando tempo esperado baseado em velocidade média de %.0f km/h: %.2fh",
-					tempoHorasCalculado, operacao.Linha, VELOCIDADE_MEDIA_ESPERADA, tempoHoras)
 			} else {
 				// Distância zero, não pode calcular
-				tempoHoras = 0
 				velocidadeMedia = 0
-				log.Printf("AVISO: Distância é 0 para linha %s, velocidade não pode ser calculada", operacao.Linha)
 			}
 
 			// Extrair apenas a data (sem hora)
