@@ -104,12 +104,29 @@ type GroupedData struct {
 	CPFRodoviario       string
 }
 
+// ParametroViagem representa os dados da tabela parametro_viagem
+type ParametroViagem struct {
+	CodLinha         int
+	Local1           string
+	Local2           string
+	Linha            string
+	CodANTT          string
+	Lat1             string
+	Long1            string
+	Lat2             string
+	Long2            string
+	DistanciaKm      sql.NullInt64
+	DistanciaMinutos sql.NullInt64
+}
+
 var (
-	cpfCache      = make(map[string]string)
-	cpfCacheLock  sync.RWMutex
-	dbPool        *sql.DB
-	dbPoolOnce    sync.Once
-	dbPoolInitErr error
+	cpfCache       = make(map[string]string)
+	cpfCacheLock   sync.RWMutex
+	linhaCache     = make(map[string]*ParametroViagem)
+	linhaCacheLock sync.RWMutex
+	dbPool         *sql.DB
+	dbPoolOnce     sync.Once
+	dbPoolInitErr  error
 )
 
 // getDBConnection retorna o pool de conexões com o banco de dados PostgreSQL
@@ -347,6 +364,84 @@ func getCPFByCodIdentificador(codIdentificador string) (string, error) {
 	cpfCacheLock.Unlock()
 
 	return cpfValue, nil
+}
+
+// getParametroViagemByCodLinha busca informações da linha na tabela parametro_viagem usando o código da linha
+func getParametroViagemByCodLinha(codLinha string) (*ParametroViagem, error) {
+	// Verificar cache primeiro
+	linhaCacheLock.RLock()
+	if linha, exists := linhaCache[codLinha]; exists {
+		linhaCacheLock.RUnlock()
+		return linha, nil
+	}
+	linhaCacheLock.RUnlock()
+
+	// Buscar no banco de dados
+	db, err := getDBConnection()
+	if err != nil {
+		// Se não conseguir conectar, retornar nil (não bloquear processamento)
+		return nil, nil
+	}
+
+	if db == nil {
+		return nil, nil
+	}
+
+	// Testar conexão com um ping rápido (silencioso)
+	if err := db.Ping(); err != nil {
+		return nil, nil
+	}
+
+	// Converter código da linha para inteiro
+	codInt, errConv := strconv.Atoi(codLinha)
+	if errConv != nil {
+		// Código inválido, salvar nil no cache
+		linhaCacheLock.Lock()
+		linhaCache[codLinha] = nil
+		linhaCacheLock.Unlock()
+		return nil, nil
+	}
+
+	var param ParametroViagem
+	query := `
+		SELECT cod_linha, local1, local2, linha, cod_antt, 
+		       lat1, long1, lat2, long2, distancia_km, distancia_minutos
+		FROM parametro_viagem 
+		WHERE cod_linha = $1
+		LIMIT 1
+	`
+
+	err = db.QueryRow(query, codInt).Scan(
+		&param.CodLinha,
+		&param.Local1,
+		&param.Local2,
+		&param.Linha,
+		&param.CodANTT,
+		&param.Lat1,
+		&param.Long1,
+		&param.Lat2,
+		&param.Long2,
+		&param.DistanciaKm,
+		&param.DistanciaMinutos,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Não encontrou, salvar nil no cache
+			linhaCacheLock.Lock()
+			linhaCache[codLinha] = nil
+			linhaCacheLock.Unlock()
+			return nil, nil
+		}
+		return nil, fmt.Errorf("erro ao consultar parametro_viagem: %w", err)
+	}
+
+	// Salvar no cache
+	linhaCacheLock.Lock()
+	linhaCache[codLinha] = &param
+	linhaCacheLock.Unlock()
+
+	return &param, nil
 }
 
 func main() {
@@ -740,7 +835,6 @@ func main() {
 }
 
 func ProcessXML(filePath string) (string, error) {
-	limb := Access()
 	placas := PlacaV()
 
 	file, err := os.ReadFile(filePath)
@@ -777,26 +871,27 @@ func ProcessXML(filePath string) (string, error) {
 				sentido = "DF-GO"
 			}
 
-			// Buscar informações da linha
+			// Buscar informações da linha do banco de dados
 			var linhaCerta, prefixoANTT string
 			var latAbertura, lngAbertura, latFechamento, lngFechamento string
-			if linha, existe := limb[operacao.Linha]; existe {
-				linhaCerta = linha.Cod
-				prefixoANTT = strings.ReplaceAll(linha.CodANTT, "-", "")
+			param, err := getParametroViagemByCodLinha(operacao.Linha)
+			if err == nil && param != nil {
+				linhaCerta = strconv.Itoa(param.CodLinha)
+				prefixoANTT = strings.ReplaceAll(param.CodANTT, "-", "")
 
 				// Preencher coordenadas baseado no sentido da viagem
 				if sentido == "GO-DF" {
 					// Sentido ida: Local1 → abertura, Local2 → fechamento
-					latAbertura = linha.Lat1
-					lngAbertura = linha.Lng1
-					latFechamento = linha.Lat2
-					lngFechamento = linha.Lng2
+					latAbertura = param.Lat1
+					lngAbertura = param.Long1
+					latFechamento = param.Lat2
+					lngFechamento = param.Long2
 				} else {
 					// Sentido volta (DF-GO): Local2 → abertura, Local1 → fechamento
-					latAbertura = linha.Lat2
-					lngAbertura = linha.Lng2
-					latFechamento = linha.Lat1
-					lngFechamento = linha.Lng1
+					latAbertura = param.Lat2
+					lngAbertura = param.Long2
+					latFechamento = param.Lat1
+					lngFechamento = param.Long1
 				}
 			}
 
@@ -866,46 +961,76 @@ func ProcessXML(filePath string) (string, error) {
 			segundos := int(duracao.Seconds()) % 60
 			tempoViagem := fmt.Sprintf("%02d:%02d:%02d", horas, minutos, segundos)
 
-			// Calcular distância da viagem usando coordenadas geográficas
+			// Calcular distância da viagem - priorizar dados da tabela
 			var distanciaKm float64
-			if linha, existe := limb[operacao.Linha]; existe {
-				// Determinar coordenadas baseado no sentido da viagem
-				var lat1, lng1, lat2, lng2 string
-				if sentido == "GO-DF" {
-					// Sentido ida: Local1 → abertura, Local2 → fechamento
-					lat1 = linha.Lat1
-					lng1 = linha.Lng1
-					lat2 = linha.Lat2
-					lng2 = linha.Lng2
+			if param != nil {
+				// Priorizar distância da tabela se disponível
+				if param.DistanciaKm.Valid {
+					distanciaKm = float64(param.DistanciaKm.Int64)
 				} else {
-					// Sentido volta (DF-GO): Local2 → abertura, Local1 → fechamento
-					lat1 = linha.Lat2
-					lng1 = linha.Lng2
-					lat2 = linha.Lat1
-					lng2 = linha.Lng1
-				}
+					// Fallback: calcular usando coordenadas geográficas se distância não estiver na tabela
+					var lat1, lng1, lat2, lng2 string
+					if sentido == "GO-DF" {
+						// Sentido ida: Local1 → abertura, Local2 → fechamento
+						lat1 = param.Lat1
+						lng1 = param.Long1
+						lat2 = param.Lat2
+						lng2 = param.Long2
+					} else {
+						// Sentido volta (DF-GO): Local2 → abertura, Local1 → fechamento
+						lat1 = param.Lat2
+						lng1 = param.Long2
+						lat2 = param.Lat1
+						lng2 = param.Long1
+					}
 
-				// Verificar se coordenadas estão preenchidas
-				if lat1 == "" || lng1 == "" || lat2 == "" || lng2 == "" {
-					log.Printf("AVISO: Coordenadas incompletas para linha %s (sentido %s): lat1=%s, lng1=%s, lat2=%s, lng2=%s",
-						operacao.Linha, sentido, lat1, lng1, lat2, lng2)
-				} else {
-					distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
+					// Verificar se coordenadas estão preenchidas
+					if lat1 != "" && lng1 != "" && lat2 != "" && lng2 != "" {
+						distanciaKm = calculateGeographicDistance(lat1, lng1, lat2, lng2)
+					} else {
+						log.Printf("AVISO: Coordenadas incompletas para linha %s (sentido %s): lat1=%s, lng1=%s, lat2=%s, lng2=%s",
+							operacao.Linha, sentido, lat1, lng1, lat2, lng2)
+					}
 				}
 			}
 
-			// Calcular velocidade média baseada em tempo esperado (ignorar tempo informado)
-			// O tempo informado está incorreto porque inclui pausas entre viagens
-			const VELOCIDADE_MEDIA_ESPERADA = 45.0 // km/h (velocidade média típica em rodovia)
-
+			// Calcular velocidade média usando distancia_minutos da tabela quando disponível
 			var velocidadeMedia float64
 
-			if distanciaKm > 0 {
-				// Calcular tempo esperado baseado na distância
-				tempoEsperadoHoras := distanciaKm / VELOCIDADE_MEDIA_ESPERADA
-				// Velocidade média = distância / tempo esperado
-				velocidadeMedia = distanciaKm / tempoEsperadoHoras
-				// Isso sempre resultará em VELOCIDADE_MEDIA_ESPERADA, mas é calculado corretamente
+			if param != nil && param.DistanciaKm.Valid && param.DistanciaMinutos.Valid {
+				// Usar dados da tabela: velocidade = distância (km) / tempo (horas)
+				// distancia_minutos está em minutos, converter para horas
+				distanciaKmTabela := float64(param.DistanciaKm.Int64)
+				distanciaMinutosTabela := float64(param.DistanciaMinutos.Int64)
+
+				if distanciaMinutosTabela > 0 {
+					// Converter minutos para horas
+					tempoHoras := distanciaMinutosTabela / 60.0
+					velocidadeMedia = distanciaKmTabela / tempoHoras
+				} else {
+					// Se distancia_minutos for 0 ou inválido, usar velocidade média esperada
+					velocidadeMedia = 45.0
+				}
+			} else if distanciaKm > 0 {
+				// Fallback: calcular usando tempo real da viagem se não houver dados na tabela
+				tempoHorasCalculado := duracao.Hours()
+
+				if tempoHorasCalculado > 0 {
+					velocidadeCalculada := distanciaKm / tempoHorasCalculado
+
+					// Validar se a velocidade calculada é razoável
+					const VELOCIDADE_MAXIMA_PERMITIDA = 70.0 // km/h (limite legal para ônibus)
+					const VELOCIDADE_MINIMA_ACEITAVEL = 15.0 // km/h (abaixo disso o tempo inclui pausas)
+
+					if velocidadeCalculada >= VELOCIDADE_MINIMA_ACEITAVEL && velocidadeCalculada <= VELOCIDADE_MAXIMA_PERMITIDA {
+						velocidadeMedia = velocidadeCalculada
+					} else {
+						// Velocidade fora da faixa = tempo incorreto (inclui pausas)
+						velocidadeMedia = 45.0 // Velocidade média esperada
+					}
+				} else {
+					velocidadeMedia = 45.0
+				}
 			} else {
 				// Distância zero, não pode calcular
 				velocidadeMedia = 0
@@ -918,8 +1043,16 @@ func ProcessXML(filePath string) (string, error) {
 			horaInicioViagem := dataInicio.Format("15:04:05")
 			horaFinalViagem := dataFim.Format("15:04:05")
 
+			// Usar distância da tabela se disponível, senão usar a calculada
+			var distanciaFinal float64
+			if param != nil && param.DistanciaKm.Valid {
+				distanciaFinal = float64(param.DistanciaKm.Int64)
+			} else {
+				distanciaFinal = distanciaKm
+			}
+
 			// Arredondar distância e velocidade para cima e converter para inteiro
-			distanciaViagemInt := int(math.Ceil(distanciaKm))
+			distanciaViagemInt := int(math.Ceil(distanciaFinal))
 			velocidadeMediaInt := int(math.Ceil(velocidadeMedia))
 
 			// Criar estrutura de dados
